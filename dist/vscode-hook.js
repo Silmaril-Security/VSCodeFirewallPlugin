@@ -1318,11 +1318,15 @@ function booleanValue(value) {
 
 // src/workspace-observation.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { chmod as chmod2, lstat as lstat2, mkdir as mkdir2, open as open2, readFile, realpath, rename as rename2, rm as rm2, stat } from "node:fs/promises";
+import { chmod as chmod2, lstat as lstat2, mkdir as mkdir2, open as open2, readFile, realpath, rename as rename2, rm as rm2, rmdir, stat } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
 import path3 from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 var MAX_WORKSPACES = 256;
 var MAX_FILE_BYTES = 64 * 1024;
+var LOCK_WAIT_MS = 1e3;
+var LOCK_POLL_MS = 10;
+var STALE_LOCK_MS = 3e4;
 async function recordObservedWorkspace(cwd, env = process.env) {
   if (typeof cwd !== "string" || !path3.isAbsolute(cwd)) return;
   let resolved;
@@ -1334,37 +1338,77 @@ async function recordObservedWorkspace(cwd, env = process.env) {
   }
   const destination = observationPath(env);
   const directory = path3.dirname(destination);
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  let current = { schemaVersion: 1, workspaces: [] };
-  try {
-    const metadata = await lstat2(destination);
-    if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.size <= MAX_FILE_BYTES) {
-      const parsed = JSON.parse(await readFile(destination, "utf8"));
-      if (isObservation(parsed)) current = parsed;
-    }
-  } catch {
-  }
-  const workspaces = current.workspaces.filter((item) => item.path !== resolved).concat({ path: resolved, lastObservedAt: now }).sort((left, right) => right.lastObservedAt.localeCompare(left.lastObservedAt)).slice(0, MAX_WORKSPACES);
-  const encoded = Buffer.from(JSON.stringify({ schemaVersion: 1, workspaces }), "utf8");
-  if (encoded.byteLength > MAX_FILE_BYTES) return;
-  const temporary = `${destination}.${process.pid}.${randomUUID3()}.tmp`;
-  let handle;
   try {
     await mkdir2(directory, { recursive: true, mode: 448 });
     const directoryInfo = await lstat2(directory);
     if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) return;
     await chmod2(directory, 448);
-    handle = await open2(temporary, "wx", 384);
-    await handle.writeFile(encoded);
-    await handle.sync();
-    await handle.close();
-    handle = void 0;
-    await rename2(temporary, destination);
-    await chmod2(destination, 384);
   } catch {
-    await handle?.close().catch(() => void 0);
-    await rm2(temporary, { force: true }).catch(() => void 0);
+    return;
   }
+  const releaseLock = await acquireRegistryLock(destination);
+  if (!releaseLock) return;
+  try {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    let current = { schemaVersion: 1, workspaces: [] };
+    try {
+      const metadata = await lstat2(destination);
+      if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.size <= MAX_FILE_BYTES) {
+        const parsed = JSON.parse(await readFile(destination, "utf8"));
+        if (isObservation(parsed)) current = parsed;
+      }
+    } catch {
+    }
+    const workspaces = current.workspaces.filter((item) => item.path !== resolved).concat({ path: resolved, lastObservedAt: now }).sort((left, right) => right.lastObservedAt.localeCompare(left.lastObservedAt)).slice(0, MAX_WORKSPACES);
+    const encoded = Buffer.from(JSON.stringify({ schemaVersion: 1, workspaces }), "utf8");
+    if (encoded.byteLength > MAX_FILE_BYTES) return;
+    const temporary = `${destination}.${process.pid}.${randomUUID3()}.tmp`;
+    let handle;
+    try {
+      handle = await open2(temporary, "wx", 384);
+      await handle.writeFile(encoded);
+      await handle.sync();
+      await handle.close();
+      handle = void 0;
+      await rename2(temporary, destination);
+      await chmod2(destination, 384);
+    } catch {
+      await handle?.close().catch(() => void 0);
+      await rm2(temporary, { force: true }).catch(() => void 0);
+    }
+  } finally {
+    await releaseLock();
+  }
+}
+async function acquireRegistryLock(destination) {
+  const lockPath = `${destination}.lock`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (Date.now() <= deadline) {
+    try {
+      await mkdir2(lockPath, { mode: 448 });
+      return async () => {
+        await rmdir(lockPath).catch(() => void 0);
+      };
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") return void 0;
+    }
+    try {
+      const metadata = await lstat2(lockPath);
+      const owned = typeof process.getuid !== "function" || metadata.uid === process.getuid();
+      if (metadata.isDirectory() && !metadata.isSymbolicLink() && owned && (metadata.mode & 63) === 0 && Date.now() - metadata.mtimeMs > STALE_LOCK_MS) {
+        await rmdir(lockPath).catch(() => void 0);
+        continue;
+      }
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") continue;
+      return void 0;
+    }
+    await delay(LOCK_POLL_MS);
+  }
+  return void 0;
+}
+function errorCode(error) {
+  return error !== null && typeof error === "object" && "code" in error ? String(error.code) : void 0;
 }
 function observationPath(env = process.env) {
   const configured = env.SILMARIL_VSCODE_WORKSPACE_STATE?.trim();

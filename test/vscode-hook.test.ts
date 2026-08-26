@@ -333,6 +333,26 @@ test("workspace observations are bounded private local paths, not payload copies
   assert.equal(observationPath({ SILMARIL_VSCODE_WORKSPACE_STATE: destination }), destination);
 });
 
+test("concurrent workspace observations preserve every workspace", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-race-"));
+  const destination = path.join(stateRoot, "observed-workspaces.json");
+  const workspaces = await Promise.all(Array.from({ length: 24 }, async (_, index) => (
+    mkdtemp(path.join(os.tmpdir(), `silmaril-vscode-project-${index}-`))
+  )));
+
+  await Promise.all(workspaces.map((workspace) => recordObservedWorkspace(
+    workspace,
+    { SILMARIL_VSCODE_WORKSPACE_STATE: destination },
+  )));
+
+  const parsed = JSON.parse(await readFile(destination, "utf8"));
+  const observed = new Set(parsed.workspaces.map((item: { path: string }) => item.path));
+  assert.deepEqual(
+    observed,
+    new Set(await Promise.all(workspaces.map((workspace) => realpath(workspace)))),
+  );
+});
+
 test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../plugin.json", import.meta.url), "utf8"));
