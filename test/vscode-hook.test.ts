@@ -340,6 +340,10 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     new URL("../com.github.copilot/hooks/hooks.json", import.meta.url),
     "utf8",
   ));
+  const launcher = await readFile(
+    new URL("../scripts/run-hook.sh", import.meta.url),
+    "utf8",
+  );
   assert.equal(packageJson.version, "0.1.0");
   assert.equal(pluginJson.$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
   assert.equal(pluginJson.name, "silmaril-vscode-firewall");
@@ -357,4 +361,7 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     && entries[0].linux === undefined
     && entries[0].windows === undefined
   )));
+  assert.match(launcher, /stat -f '%u %Lp'/u);
+  assert.match(launcher, /\[ -L "\$\{runtime_file\}" \]/u);
+  assert.match(launcher, /\[ -L "\$\{node_path\}" \]/u);
 });

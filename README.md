@@ -30,5 +30,3 @@ npm run pack:dry
 ```
 
 The built `dist/vscode-hook.js` file is committed because VS Code executes the plugin directly from its installed directory.
-
-Silmaril Firewall protection for local VS Code agent harnesses.
