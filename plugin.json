@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "silmaril-vscode-firewall",
+  "description": "Silmaril Firewall protection for local VS Code agent harnesses.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Silmaril Security",
+    "url": "https://www.silmaril.dev"
+  },
+  "homepage": "https://www.silmaril.dev/docs",
+  "repository": "https://github.com/Silmaril-Security/VSCodeFirewallPlugin",
+  "license": "Apache-2.0",
+  "keywords": [
+    "vscode",
+    "ai-security",
+    "firewall",
+    "prompt-injection"
+  ]
+}
+
