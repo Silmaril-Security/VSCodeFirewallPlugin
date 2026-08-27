@@ -207,10 +207,14 @@ test("block uses VS Code native pre-execution and continuation controls", async 
       },
     },
   );
-  assert.deepEqual(
-    await runVSCodeHook("PostToolUse", payload("PostToolUse"), env, dependencies([malicious], events)),
-    { decision: "block", reason: SAFE_BLOCK_MESSAGE },
+  const postToolOutput = await runVSCodeHook(
+    "PostToolUse",
+    payload("PostToolUse"),
+    env,
+    dependencies([malicious], events),
   );
+  assert.deepEqual(postToolOutput, { decision: "block", reason: SAFE_BLOCK_MESSAGE });
+  assert.doesNotMatch(JSON.stringify(postToolOutput), /tool result/u);
   assert.ok(events.every((event) => (
     event.policyDecision === "block"
     && event.nativeAction === "block_returned"
