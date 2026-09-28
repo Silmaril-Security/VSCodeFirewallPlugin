@@ -1444,6 +1444,7 @@ var LOOKUP_TIMEOUT_MS = 100;
 var MAX_OUTPUT_BYTES = 1024;
 var MAX_NAME_UNITS = 256;
 var CACHE_TTL_MS = 5 * 60 * 1e3;
+var CACHE_TIME_SKEW_MS = 2e3;
 var MAX_CACHE_BYTES = 4 * 1024;
 var CACHE_FILE_NAME = "cache.json";
 var CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/u;
@@ -1467,14 +1468,14 @@ function createMacComputerNameSource(options = {}) {
       if (platform() !== "darwin") return void 0;
       const current = now();
       if (!Number.isFinite(current)) return readComputerName(spawn);
-      if (cache && current < cache.expiresAt) return cache.value;
+      if (cache && freshMemoryCache(cache, current)) return cache.value;
       const stored = readCache(cacheDirectory, current);
       if (stored) {
         cache = stored;
         return stored.value;
       }
       const value = readComputerName(spawn);
-      const entry = { value, expiresAt: current + CACHE_TTL_MS };
+      const entry = { value, cachedAt: current, expiresAt: current + CACHE_TTL_MS };
       cache = entry;
       writeCache(cacheDirectory, entry);
       return value;
@@ -1525,16 +1526,39 @@ function readCache(cacheDirectory, current) {
     const parsed = JSON.parse(readFileSync2(filePath, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
     const record = parsed;
-    if (typeof record.expiresAt !== "number" || !Number.isFinite(record.expiresAt) || current >= record.expiresAt) {
-      return void 0;
-    }
-    if (record.name === null) return { value: void 0, expiresAt: record.expiresAt };
+    const times = fileTimes(info);
+    if (!times) return void 0;
+    const expiresAt = boundedExpiry(record.expiresAt, current, times);
+    if (expiresAt === void 0) return void 0;
+    if (record.name === null) return { value: void 0, cachedAt: current, expiresAt };
     const name = sanitizeDeviceName(record.name);
     if (!name) return void 0;
-    return { value: name, expiresAt: record.expiresAt };
+    return { value: name, cachedAt: current, expiresAt };
   } catch {
     return void 0;
   }
+}
+function freshMemoryCache(cache, current) {
+  return current >= cache.cachedAt && current < cache.expiresAt && current - cache.cachedAt < CACHE_TTL_MS;
+}
+function fileTimes(info) {
+  if (!info) return void 0;
+  const mtimeMs = typeof info.mtimeMs === "number" ? info.mtimeMs : Number(info.mtimeMs);
+  const ctimeMs = typeof info.ctimeMs === "number" ? info.ctimeMs : Number(info.ctimeMs);
+  const birthtimeMs = typeof info.birthtimeMs === "number" ? info.birthtimeMs : Number(info.birthtimeMs);
+  if (![mtimeMs, ctimeMs, birthtimeMs].every(Number.isFinite)) return void 0;
+  return { mtimeMs, ctimeMs, birthtimeMs };
+}
+function boundedExpiry(value, current, times) {
+  if (typeof value !== "number" || !Number.isFinite(value) || current >= value) return void 0;
+  if (value > current + CACHE_TTL_MS) return void 0;
+  const stamps = [times.mtimeMs, times.ctimeMs];
+  if (times.birthtimeMs > 0) stamps.push(times.birthtimeMs);
+  if (stamps.some((stamp) => stamp > current + CACHE_TIME_SKEW_MS)) return void 0;
+  const oldest = Math.min(...stamps);
+  if (current - oldest >= CACHE_TTL_MS) return void 0;
+  if (value > oldest + CACHE_TTL_MS + CACHE_TIME_SKEW_MS) return void 0;
+  return Math.min(value, oldest + CACHE_TTL_MS);
 }
 function writeCache(cacheDirectory, entry) {
   const temporary = path4.join(cacheDirectory, `.cache.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
