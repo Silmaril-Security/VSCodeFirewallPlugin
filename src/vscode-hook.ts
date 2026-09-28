@@ -17,6 +17,7 @@ import {
   type FirewallMode,
 } from "./runtime-config.ts";
 import { recordObservedWorkspace } from "./workspace-observation.ts";
+import { resolvePluginDeviceName, sanitizeDeviceName } from "./mac-computer-name.ts";
 
 export const PLUGIN_NAME = "silmaril-vscode-firewall";
 export const PLUGIN_VERSION = "0.1.0";
@@ -62,6 +63,7 @@ export type RuntimeDependencies = {
   firewallConstructor: FirewallConstructor;
   evidenceEmitter: (event: LocalProtectionEventV1, env: RuntimeEnv) => Promise<unknown>;
   workspaceObserver: (cwd: unknown, env: RuntimeEnv) => Promise<unknown>;
+  deviceName?: () => string | undefined;
 };
 
 const DEFAULT_DEPENDENCIES: RuntimeDependencies = {
@@ -84,6 +86,7 @@ export async function runVSCodeHook(
   const target = buildHookTarget(eventName, input);
   if (!target) return {};
 
+  const deviceName = resolvePluginDeviceName(dependencies.deviceName);
   let result: ClassificationResult;
   try {
     const client = new dependencies.firewallConstructor({
@@ -100,6 +103,7 @@ export async function runVSCodeHook(
         target.metadata,
         config.endpointId,
         governanceContext(target),
+        deviceName,
       ),
     });
   } catch (error) {
@@ -220,6 +224,7 @@ export function withProvenance(
   metadata: Record<string, unknown>,
   endpointId?: string,
   governance?: GovernanceContext,
+  deviceName?: string,
 ): Record<string, unknown> {
   const silmaril = readRecord(metadata.silmaril) ?? {};
   return {
@@ -230,6 +235,7 @@ export function withProvenance(
         schema_version: 1,
         endpoint_id: endpointId,
         harness: "vscode",
+        device_name: sanitizeDeviceName(deviceName),
       }),
       ...(governance ? { governance } : {}),
     },

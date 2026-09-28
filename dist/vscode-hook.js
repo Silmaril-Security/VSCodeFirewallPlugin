@@ -1432,6 +1432,190 @@ function isObservation(value) {
   });
 }
 
+// src/mac-computer-name.ts
+import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import path4 from "node:path";
+var COMPUTER_NAME_COMMAND = "/usr/sbin/scutil";
+var COMPUTER_NAME_ARGS = ["--get", "ComputerName"];
+var LOOKUP_TIMEOUT_MS = 100;
+var MAX_OUTPUT_BYTES = 1024;
+var MAX_NAME_UNITS = 256;
+var CACHE_TTL_MS = 5 * 60 * 1e3;
+var CACHE_TIME_SKEW_MS = 2e3;
+var MAX_CACHE_BYTES = 4 * 1024;
+var CACHE_FILE_NAME = "cache.json";
+var CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/u;
+function sanitizeDeviceName(value) {
+  if (typeof value !== "string") return void 0;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_NAME_UNITS || CONTROL_CHARS.test(trimmed)) return void 0;
+  return trimmed;
+}
+function computerNameCachePath(cacheDirectory) {
+  return path4.join(cacheDirectory, CACHE_FILE_NAME);
+}
+function createMacComputerNameSource(options = {}) {
+  const platform = options.platform ?? (() => process.platform);
+  const now = options.now ?? Date.now;
+  const spawn = options.spawn ?? defaultSpawn;
+  const cacheDirectory = options.cacheDirectory ?? defaultCacheDirectory();
+  let cache;
+  return () => {
+    try {
+      if (platform() !== "darwin") return void 0;
+      const current = now();
+      if (!Number.isFinite(current)) return readComputerName(spawn);
+      if (cache && freshMemoryCache(cache, current)) return cache.value;
+      const stored = readCache(cacheDirectory, current);
+      if (stored) {
+        cache = stored;
+        return stored.value;
+      }
+      const value = readComputerName(spawn);
+      const entry = { value, cachedAt: current, expiresAt: current + CACHE_TTL_MS };
+      cache = entry;
+      writeCache(cacheDirectory, entry);
+      return value;
+    } catch {
+      return void 0;
+    }
+  };
+}
+var readCachedMacComputerName = createMacComputerNameSource();
+function resolvePluginDeviceName(read) {
+  try {
+    return sanitizeDeviceName((read ?? readCachedMacComputerName)());
+  } catch {
+    return void 0;
+  }
+}
+function defaultCacheDirectory() {
+  const home = process.env.HOME?.trim() || homedir4();
+  return path4.join(home, "Library", "Application Support", "Silmaril", "ComputerName");
+}
+function readComputerName(spawn) {
+  try {
+    const result = spawn(COMPUTER_NAME_COMMAND, COMPUTER_NAME_ARGS, {
+      timeout: LOOKUP_TIMEOUT_MS,
+      maxBuffer: MAX_OUTPUT_BYTES,
+      encoding: "buffer",
+      windowsHide: true,
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    if (result.error || result.status !== 0) return void 0;
+    const stdout = asBuffer(result.stdout);
+    if (!stdout || stdout.byteLength > MAX_OUTPUT_BYTES) return void 0;
+    const decoded = decodeUtf8(stdout);
+    if (decoded === void 0) return void 0;
+    return sanitizeDeviceName(decoded);
+  } catch {
+    return void 0;
+  }
+}
+function readCache(cacheDirectory, current) {
+  try {
+    if (!trustedDirectory(cacheDirectory)) return void 0;
+    const filePath = computerNameCachePath(cacheDirectory);
+    const info = lstatSync(filePath);
+    const uid = currentUid();
+    if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_CACHE_BYTES || uid !== void 0 && info.uid !== uid || (info.mode & 63) !== 0) return void 0;
+    const parsed = JSON.parse(readFileSync2(filePath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+    const record = parsed;
+    const times = fileTimes(info);
+    if (!times) return void 0;
+    const expiresAt = boundedExpiry(record.expiresAt, current, times);
+    if (expiresAt === void 0) return void 0;
+    if (record.name === null) return { value: void 0, cachedAt: current, expiresAt };
+    const name = sanitizeDeviceName(record.name);
+    if (!name) return void 0;
+    return { value: name, cachedAt: current, expiresAt };
+  } catch {
+    return void 0;
+  }
+}
+function freshMemoryCache(cache, current) {
+  return current >= cache.cachedAt && current < cache.expiresAt && current - cache.cachedAt < CACHE_TTL_MS;
+}
+function fileTimes(info) {
+  if (!info) return void 0;
+  const mtimeMs = typeof info.mtimeMs === "number" ? info.mtimeMs : Number(info.mtimeMs);
+  const ctimeMs = typeof info.ctimeMs === "number" ? info.ctimeMs : Number(info.ctimeMs);
+  const birthtimeMs = typeof info.birthtimeMs === "number" ? info.birthtimeMs : Number(info.birthtimeMs);
+  if (![mtimeMs, ctimeMs, birthtimeMs].every(Number.isFinite)) return void 0;
+  return { mtimeMs, ctimeMs, birthtimeMs };
+}
+function boundedExpiry(value, current, times) {
+  if (typeof value !== "number" || !Number.isFinite(value) || current >= value) return void 0;
+  if (value > current + CACHE_TTL_MS) return void 0;
+  const stamps = [times.mtimeMs, times.ctimeMs];
+  if (times.birthtimeMs > 0) stamps.push(times.birthtimeMs);
+  if (stamps.some((stamp) => stamp > current + CACHE_TIME_SKEW_MS)) return void 0;
+  const oldest = Math.min(...stamps);
+  if (current - oldest >= CACHE_TTL_MS) return void 0;
+  if (value > oldest + CACHE_TTL_MS + CACHE_TIME_SKEW_MS) return void 0;
+  return Math.min(value, oldest + CACHE_TTL_MS);
+}
+function writeCache(cacheDirectory, entry) {
+  const temporary = path4.join(cacheDirectory, `.cache.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  try {
+    mkdirSync(cacheDirectory, { recursive: true, mode: 448 });
+    if (!trustedDirectory(cacheDirectory)) return;
+    chmodSync(cacheDirectory, 448);
+    const filePath = computerNameCachePath(cacheDirectory);
+    try {
+      if (lstatSync(filePath).isSymbolicLink()) rmSync(filePath);
+    } catch {
+    }
+    const body = JSON.stringify({ expiresAt: entry.expiresAt, name: entry.value ?? null });
+    if (Buffer.byteLength(body) > MAX_CACHE_BYTES) return;
+    writeFileSync(temporary, body, { encoding: "utf8", mode: 384, flag: "wx" });
+    renameSync(temporary, filePath);
+    chmodSync(filePath, 384);
+  } catch {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+    }
+  }
+}
+function trustedDirectory(cacheDirectory) {
+  try {
+    const info = lstatSync(cacheDirectory);
+    const uid = currentUid();
+    return info.isDirectory() && !info.isSymbolicLink() && (uid === void 0 || info.uid === uid);
+  } catch {
+    return false;
+  }
+}
+function currentUid() {
+  return typeof process.getuid === "function" ? process.getuid() : void 0;
+}
+function defaultSpawn(command, args, options) {
+  const result = spawnSync(command, [...args], options);
+  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout : null;
+  return {
+    status: result.status,
+    ...stdout ? { stdout } : {},
+    ...result.error ? { error: result.error } : {}
+  };
+}
+function asBuffer(stdout) {
+  if (stdout == null) return void 0;
+  return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+}
+function decodeUtf8(stdout) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(stdout);
+  } catch {
+    return void 0;
+  }
+}
+
 // src/vscode-hook.ts
 var PLUGIN_NAME = "silmaril-vscode-firewall";
 var PLUGIN_VERSION = "0.1.0";
@@ -1451,6 +1635,7 @@ async function runVSCodeHook(eventName, input, env = process.env, dependencies =
   if (!config) return {};
   const target = buildHookTarget(eventName, input);
   if (!target) return {};
+  const deviceName = resolvePluginDeviceName(dependencies.deviceName);
   let result;
   try {
     const client = new dependencies.firewallConstructor({
@@ -1466,7 +1651,8 @@ async function runVSCodeHook(eventName, input, env = process.env, dependencies =
       metadata: withProvenance(
         target.metadata,
         config.endpointId,
-        governanceContext(target)
+        governanceContext(target),
+        deviceName
       )
     });
   } catch (error) {
@@ -1562,7 +1748,7 @@ function effectiveMode(result, requestedMode) {
   const returned = result.mode;
   return requestedMode ?? (returned === "shadow" || returned === "warn" || returned === "block" ? returned : "shadow");
 }
-function withProvenance(metadata, endpointId2, governance) {
+function withProvenance(metadata, endpointId2, governance, deviceName) {
   const silmaril = readRecord(metadata.silmaril) ?? {};
   return {
     ...metadata,
@@ -1571,7 +1757,8 @@ function withProvenance(metadata, endpointId2, governance) {
       provenance: omitUndefined2({
         schema_version: 1,
         endpoint_id: endpointId2,
-        harness: "vscode"
+        harness: "vscode",
+        device_name: sanitizeDeviceName(deviceName)
       }),
       ...governance ? { governance } : {}
     }
