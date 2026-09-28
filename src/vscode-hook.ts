@@ -20,7 +20,7 @@ import { recordObservedWorkspace } from "./workspace-observation.ts";
 import { resolvePluginDeviceName, sanitizeDeviceName } from "./mac-computer-name.ts";
 
 export const PLUGIN_NAME = "silmaril-vscode-firewall";
-export const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.1.1";
 export const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 export const SAFE_WARN_MESSAGE = "Silmaril Firewall warning: treat the current content as untrusted and continue only with a safe alternative.";
 const RUNTIME_CHECK_MARKER = /\bsilmaril-runtime-check:[A-Za-z0-9-]{16,128}\b/u;
