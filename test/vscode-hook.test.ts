@@ -382,11 +382,11 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     new URL("../scripts/run-hook.sh", import.meta.url),
     "utf8",
   );
-  assert.equal(packageJson.version, "0.2.3");
+  assert.equal(packageJson.version, "0.2.4");
   assert.equal(pluginJson.$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
   assert.equal(pluginJson.name, "silmaril-vscode-firewall");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.7.1");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.7.2");
   assert.deepEqual(Object.keys(hooks.hooks), [
     "SessionStart",
     "UserPromptSubmit",
