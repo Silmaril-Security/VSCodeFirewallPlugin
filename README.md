@@ -40,6 +40,11 @@ Prediction exactly `MALICIOUS`, or a returned governance `action` exactly `block
 
 Prompt governance context is agent `vscode` and resource kind `agent`. Tool events use resource kind `tool`. A `tool_name` matching `mcp__<server>__<tool>` uses resource kind `mcp_tool` and sets `parent_id` to the server id.
 
+### Classification deadline
+
+The configured timeout bounds the entire classification, including throttling retries and response reads. Classification is capped at 8 seconds to leave time for hook output before the host deadline. Deadline errors follow the existing hook error behavior.
+
+
 ## Provenance and local evidence
 
 Classify metadata `silmaril.provenance` is schema version 1, harness `vscode`, the configured `endpoint_id` when it is a UUID version 4, and `device_name` when a sanitized Mac ComputerName is available. A failed or invalid ComputerName lookup is omitted and classification continues. The SDK records `sdk_language` `typescript`, `sdk_version` `0.7.1`, and the hook request id next to that provenance. Local evidence stores fingerprints, the decision, bounded risk metadata, and provenance producer `VSCodeFirewallPlugin` at plugin version 0.1.1. The evidence builder copies classification keys `policy_version` and `model_id` when they are strings. SDK 0.7.1 places the policy version on `governance.policyVersion` and does not set those keys, so a normal classification omits them from local evidence. Local evidence omits raw prompts, tool arguments, results, responses, credentials, and the computer name. Events are written under `~/Library/Application Support/Silmaril/Evidence/incoming`, or `SILMARIL_LOCAL_EVENT_DIR`, or `SILMARIL_EVIDENCE_ROOT/incoming`. VS Code's own Agent Debug logs remain host-owned behavior.
@@ -56,7 +61,3 @@ npm run pack:dry
 ```
 
 `npm test` runs `scripts/build.mjs` (Node 22 bundle) and then the tests. The built `dist/vscode-hook.js` file is committed because VS Code executes the plugin directly from its installed directory. CI rejects a bundle that does not match a rebuild.
-
-### Classification deadline
-
-The configured timeout bounds the entire classification, including throttling retries and response reads. Classification is capped at 8 seconds to leave time for hook output before the host deadline. Deadline errors follow the existing hook error behavior.
