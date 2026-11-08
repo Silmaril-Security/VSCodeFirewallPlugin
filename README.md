@@ -27,6 +27,13 @@ without reading transcripts.
 
 ## Requirements
 
+Release [v0.3.0](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.0)
+is available as the immutable source for this version. Installation remains a
+managed local macOS operation owned by SilmarilMacOS, which adopts the exact
+plugin payload into the paths below. The release is not a VS Code Marketplace
+or npm distribution, and checking it out does not qualify direct GUI, remote,
+or native-host protection.
+
 SilmarilMacOS manages local installation and configuration. Plugin 0.3.0
 requires macOS and Node.js 22 or newer. VS Code stable 1.145.2 is the shared
 Copilot reference used for this update. Local support retains its VS Code 1.110
