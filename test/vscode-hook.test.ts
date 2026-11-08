@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -804,36 +804,82 @@ test("private launcher safely handles plugin paths with spaces and both CLI form
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "silmaril launcher ")));
   const home = path.join(root, "home");
   const pluginPath = path.join(root, "plugin path with spaces");
+  const sharedWorkspace = path.join(root, "shared workspace");
+  const localWorkspace = path.join(root, "local workspace");
+  const stateDirectory = path.join(root, "private state");
+  const statePath = path.join(stateDirectory, "observed-workspaces.json");
   const repository = await realpath(new URL("../", import.meta.url));
   await mkdir(path.join(pluginPath, "dist"), { recursive: true });
+  await mkdir(sharedWorkspace);
+  await mkdir(localWorkspace);
+  await mkdir(stateDirectory, { mode: 0o700 });
+  await writeFile(
+    statePath,
+    JSON.stringify({ schemaVersion: 1, workspaces: [] }),
+    { mode: 0o600 },
+  );
   await copyFile(
     path.join(repository, "dist", "vscode-hook.js"),
     path.join(pluginPath, "dist", "vscode-hook.js"),
   );
   await mkdir(path.join(home, ".vscode"), { recursive: true });
+  const runtimePath = path.join(home, ".vscode", "silmaril-firewall-node-path");
   await writeFile(
-    path.join(home, ".vscode", "silmaril-firewall-node-path"),
+    runtimePath,
     `${process.execPath}\n`,
     { mode: 0o600 },
   );
+  const runtimeInfo = await lstat(runtimePath);
+  const nodeInfo = await lstat(process.execPath);
+  const stateInfo = await lstat(statePath);
+  assert.equal(runtimeInfo.isSymbolicLink(), false);
+  assert.equal(nodeInfo.isSymbolicLink(), false);
+  assert.equal(stateInfo.isSymbolicLink(), false);
+  assert.equal(runtimeInfo.mode & 0o777, 0o600);
+  assert.equal(stateInfo.mode & 0o777, 0o600);
+  if (typeof process.getuid === "function") {
+    assert.equal(runtimeInfo.uid, process.getuid());
+    assert.equal(stateInfo.uid, process.getuid());
+  }
   const launcher = path.join(repository, "scripts", "run-hook.sh");
-  const env = { ...process.env, HOME: home, PLUGIN_ROOT: pluginPath };
+  const env = {
+    ...process.env,
+    HOME: home,
+    PLUGIN_ROOT: pluginPath,
+    SILMARIL_VSCODE_WORKSPACE_STATE: statePath,
+  };
 
   const dispatched = spawnSync(launcher, ["dispatch", "sessionStart"], {
-    input: JSON.stringify(copilotPayload("sessionStart")),
+    input: JSON.stringify({
+      ...copilotPayload("sessionStart"),
+      cwd: sharedWorkspace,
+    }),
     encoding: "utf8",
     env,
   });
   assert.equal(dispatched.status, 0, dispatched.stderr);
   assert.deepEqual(JSON.parse(dispatched.stdout), {});
+  let state = JSON.parse(await readFile(statePath, "utf8"));
+  assert.deepEqual(
+    state.workspaces.map((item: { path: string }) => item.path),
+    [await realpath(sharedWorkspace)],
+  );
 
   const legacy = spawnSync(launcher, ["SessionStart"], {
-    input: JSON.stringify(payload("SessionStart")),
+    input: JSON.stringify({
+      ...payload("SessionStart"),
+      cwd: localWorkspace,
+    }),
     encoding: "utf8",
     env,
   });
   assert.equal(legacy.status, 0, legacy.stderr);
   assert.deepEqual(JSON.parse(legacy.stdout), {});
+  state = JSON.parse(await readFile(statePath, "utf8"));
+  assert.deepEqual(
+    new Set(state.workspaces.map((item: { path: string }) => item.path)),
+    new Set([await realpath(sharedWorkspace), await realpath(localWorkspace)]),
+  );
 });
 
 test("classify metadata includes the mac computer name without an endpoint id", async () => {
