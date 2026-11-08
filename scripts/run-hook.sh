@@ -38,4 +38,4 @@ case "${node_mode}" in
     ;;
 esac
 
-exec "${node_path}" "${PLUGIN_ROOT}/dist/vscode-hook.js" "${1:-}"
+exec "${node_path}" "${PLUGIN_ROOT}/dist/vscode-hook.js" "$@"

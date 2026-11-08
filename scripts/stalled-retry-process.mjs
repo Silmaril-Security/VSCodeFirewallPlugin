@@ -10,5 +10,11 @@ const started = performance.now();
 let hookMS;
 // Observe natural process exit after every SDK timer has drained, excluding startup.
 process.once("exit", () => writeSync(1, JSON.stringify({ attempts, hookMS, processMS: performance.now() - started }) + "\n"));
-await hook.runVSCodeHook("UserPromptSubmit", { prompt: "synthetic test" }, env);
+await hook.runVSCodeHook("UserPromptSubmit", {
+  hook_event_name: "UserPromptSubmit",
+  session_id: "deadline-process-test",
+  timestamp: "2026-11-08T00:00:00.000Z",
+  cwd: "/tmp",
+  prompt: "synthetic test",
+}, env);
 hookMS = performance.now() - started;

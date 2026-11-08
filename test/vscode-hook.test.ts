@@ -1,20 +1,26 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { Firewall } from "@silmaril-security/sdk";
 import {
   PLUGIN_VERSION,
   SAFE_BLOCK_MESSAGE,
   SAFE_WARN_MESSAGE,
   buildHookTarget,
+  dispatchVSCodeHook,
   effectiveMode,
   governanceContext,
   isBlockCandidate,
+  runVSCodeCopilotHook,
   runVSCodeHook,
   withProvenance,
+  type RuntimeDependencies,
+  type VSCodeCopilotEventName,
   type VSCodeEventName,
 } from "../src/vscode-hook.ts";
 import {
@@ -86,6 +92,36 @@ function payload(event: VSCodeEventName): Record<string, unknown> {
         tool_input: { command: "pwd" },
         tool_response: "tool result",
         tool_use_id: "tool-1",
+      };
+  }
+}
+
+function copilotPayload(event: VSCodeCopilotEventName): Record<string, unknown> {
+  const base = {
+    sessionId: "session-1",
+    timestamp: 1_788_307_200_000,
+    cwd: "/tmp/project",
+  };
+  switch (event) {
+    case "sessionStart":
+      return { ...base, source: "new" };
+    case "userPromptSubmitted":
+      return { ...base, prompt: "user prompt" };
+    case "preToolUse":
+      return {
+        ...base,
+        toolName: "runTerminalCommand",
+        toolArgs: { command: "pwd" },
+      };
+    case "postToolUse":
+      return {
+        ...base,
+        toolName: "runTerminalCommand",
+        toolArgs: { command: "pwd" },
+        toolResult: {
+          resultType: "success",
+          textResultForLlm: "tool result",
+        },
       };
   }
 }
@@ -222,6 +258,268 @@ test("block uses VS Code native pre-execution and continuation controls", async 
   )));
 });
 
+test("dispatch selects one validated nonmixed runtime schema and classifies once", async () => {
+  const calls: any[] = [];
+  const deps = dependencies(
+    Array.from({ length: 2 }, () => ({ prediction: "BENIGN", score: 0.01, threshold: 0.5 })),
+    [],
+    calls,
+  );
+  assert.deepEqual(
+    await dispatchVSCodeHook("preToolUse", payload("PreToolUse"), BASE_ENV, deps),
+    {},
+  );
+  assert.deepEqual(
+    await dispatchVSCodeHook("preToolUse", copilotPayload("preToolUse"), BASE_ENV, deps),
+    {},
+  );
+  const classifications = calls.filter((call) => call.text);
+  assert.equal(classifications.length, 2);
+  assert.deepEqual(
+    classifications.map((call) => call.options.metadata.vscodeHookRuntime),
+    ["local", "copilot"],
+  );
+  assert.deepEqual(
+    classifications.map((call) => call.options.metadata.vscodeHookEvent),
+    ["PreToolUse", "preToolUse"],
+  );
+
+  const rejected = [
+    { ...copilotPayload("preToolUse"), sessionId: "" },
+    { ...copilotPayload("preToolUse"), session_id: "mixed" },
+    { ...payload("PreToolUse"), sessionId: "mixed" },
+    { ...payload("PreToolUse"), hook_event_name: "PostToolUse" },
+    { ...copilotPayload("preToolUse"), timestamp: "2026-08-26T00:00:00Z" },
+  ];
+  for (const input of rejected) {
+    assert.deepEqual(await dispatchVSCodeHook("preToolUse", input, BASE_ENV, deps), {});
+  }
+  assert.equal(calls.filter((call) => call.text).length, 2);
+  assert.deepEqual(
+    await runVSCodeCopilotHook("preToolUse", payload("PreToolUse"), BASE_ENV, deps),
+    {},
+  );
+  assert.deepEqual(
+    await runVSCodeHook("PreToolUse", copilotPayload("preToolUse"), BASE_ENV, deps),
+    {},
+  );
+  assert.equal(calls.filter((call) => call.text).length, 2);
+});
+
+test("request IDs preserve native Copilot timestamps and Local tool IDs", async () => {
+  const calls: any[] = [];
+  const deps = dependencies(
+    Array.from({ length: 7 }, () => ({ prediction: "BENIGN", score: 0.01, threshold: 0.5 })),
+    [],
+    calls,
+  );
+  const shared = copilotPayload("userPromptSubmitted");
+  await runVSCodeCopilotHook("userPromptSubmitted", shared, BASE_ENV, deps);
+  await runVSCodeCopilotHook("userPromptSubmitted", { ...shared }, BASE_ENV, deps);
+  await runVSCodeCopilotHook("userPromptSubmitted", {
+    ...shared,
+    timestamp: (shared.timestamp as number) + 1,
+  }, BASE_ENV, deps);
+
+  const localTool = payload("PreToolUse");
+  await runVSCodeHook("PreToolUse", localTool, BASE_ENV, deps);
+  await runVSCodeHook("PreToolUse", {
+    ...localTool,
+    timestamp: "2026-08-26T00:00:01Z",
+  }, BASE_ENV, deps);
+  await runVSCodeHook("PreToolUse", {
+    ...localTool,
+    tool_use_id: "tool-2",
+  }, BASE_ENV, deps);
+
+  const requestIds = calls
+    .filter((call) => call.text)
+    .map((call) => call.options.requestId);
+  assert.equal(requestIds.length, 6);
+  assert.equal(requestIds[0], requestIds[1], "same shared event and timestamp is stable");
+  assert.notEqual(requestIds[1], requestIds[2], "different shared timestamps are distinct");
+  assert.equal(requestIds[3], requestIds[4], "Local tool_use_id takes precedence over timestamp");
+  assert.notEqual(requestIds[4], requestIds[5], "different Local tool_use_id values are distinct");
+});
+
+test("Local dispatch accepts optional common fields but rejects malformed mixed payloads", async () => {
+  const calls: any[] = [];
+  const deps = dependencies([{ prediction: "BENIGN", score: 0.01, threshold: 0.5 }], [], calls);
+  const legacy: Record<string, unknown> = {
+    hook_event_name: "UserPromptSubmit",
+    timestamp: "2026-08-26T00:00:00Z",
+    prompt: "legacy prompt without optional common fields",
+  };
+  assert.deepEqual(
+    await dispatchVSCodeHook("userPromptSubmitted", legacy, BASE_ENV, deps),
+    {},
+  );
+  assert.equal(calls.filter((call) => call.text).length, 1);
+
+  const malformed = [
+    { ...legacy, sessionId: "mixed-shared-session" },
+    { ...legacy, timestamp: 1_788_307_200_000 },
+    { ...legacy, hook_event_name: "PreToolUse" },
+    {
+      hook_event_name: "PreToolUse",
+      timestamp: "2026-08-26T00:00:00Z",
+      tool_name: "runTerminalCommand",
+      tool_input: { command: "pwd" },
+    },
+    {
+      ...copilotPayload("userPromptSubmitted"),
+      hook_event_name: "UserPromptSubmit",
+    },
+    {
+      ...copilotPayload("userPromptSubmitted"),
+      session_id: "mixed-local-session",
+    },
+  ];
+  for (const input of malformed) {
+    assert.deepEqual(
+      await dispatchVSCodeHook("userPromptSubmitted", input, BASE_ENV, deps),
+      {},
+    );
+  }
+  assert.deepEqual(
+    await dispatchVSCodeHook("preToolUse", {
+      hook_event_name: "PreToolUse",
+      timestamp: "2026-08-26T00:00:00Z",
+      tool_name: "runTerminalCommand",
+      tool_input: { command: "pwd" },
+    }, BASE_ENV, deps),
+    {},
+  );
+  assert.equal(calls.filter((call) => call.text).length, 1);
+});
+
+test("numeric values in documented string fields fail open without classification or evidence", async () => {
+  const calls: any[] = [];
+  const events: any[] = [];
+  const deps = dependencies([], events, calls);
+  const malformed: Array<[VSCodeCopilotEventName, Record<string, unknown>]> = [
+    ["userPromptSubmitted", { ...copilotPayload("userPromptSubmitted"), sessionId: 123 }],
+    ["userPromptSubmitted", { ...copilotPayload("userPromptSubmitted"), cwd: 123 }],
+    ["preToolUse", { ...copilotPayload("preToolUse"), toolName: 123 }],
+    ["userPromptSubmitted", { ...payload("UserPromptSubmit"), session_id: 123 }],
+    ["userPromptSubmitted", { ...payload("UserPromptSubmit"), cwd: 123 }],
+    ["userPromptSubmitted", { ...payload("UserPromptSubmit"), transcript_path: 123 }],
+    ["preToolUse", { ...payload("PreToolUse"), tool_name: 123 }],
+    ["preToolUse", { ...payload("PreToolUse"), tool_use_id: 123 }],
+  ];
+  for (const [eventName, input] of malformed) {
+    assert.deepEqual(await dispatchVSCodeHook(eventName, input, BASE_ENV, deps), {});
+  }
+  assert.equal(calls.length, 0);
+  assert.equal(events.length, 0);
+});
+
+test("Copilot outputs use only documented event-specific controls", async () => {
+  const blockEnv = { ...BASE_ENV, SILMARIL_MODE: "block" };
+  const malicious = { prediction: "MALICIOUS", score: 0.99, threshold: 0.5 };
+  const blockEvents: any[] = [];
+
+  assert.deepEqual(
+    await runVSCodeCopilotHook(
+      "userPromptSubmitted",
+      copilotPayload("userPromptSubmitted"),
+      blockEnv,
+      dependencies([malicious], blockEvents),
+    ),
+    {},
+  );
+  assert.deepEqual(
+    await runVSCodeCopilotHook(
+      "preToolUse",
+      copilotPayload("preToolUse"),
+      blockEnv,
+      dependencies([{ prediction: "BENIGN", governance: { action: "block" } }], blockEvents),
+    ),
+    {
+      permissionDecision: "deny",
+      permissionDecisionReason: SAFE_BLOCK_MESSAGE,
+    },
+  );
+  assert.deepEqual(
+    await runVSCodeCopilotHook(
+      "postToolUse",
+      copilotPayload("postToolUse"),
+      blockEnv,
+      dependencies([malicious], blockEvents),
+    ),
+    {
+      modifiedResult: {
+        resultType: "success",
+        textResultForLlm: SAFE_BLOCK_MESSAGE,
+      },
+    },
+  );
+  assert.equal(blockEvents[0].policyDecision, "unavailable");
+  assert.equal(blockEvents[0].blockUnavailable, true);
+  assert.equal(blockEvents[0].nativeAction, "allowed");
+  assert.equal(blockEvents[1].policyDecision, "block");
+  assert.equal(blockEvents[1].nativeAction, "block_returned");
+  assert.equal(blockEvents[2].nativeAction, "content_replaced");
+  assert.doesNotMatch(JSON.stringify(blockEvents), /user prompt|tool result|pwd/u);
+
+  const warnEnv = { ...BASE_ENV, SILMARIL_MODE: "warn" };
+  const warnEvents: any[] = [];
+  assert.deepEqual(
+    await runVSCodeCopilotHook(
+      "userPromptSubmitted",
+      copilotPayload("userPromptSubmitted"),
+      warnEnv,
+      dependencies([malicious], warnEvents),
+    ),
+    {},
+  );
+  assert.deepEqual(
+    await runVSCodeCopilotHook(
+      "preToolUse",
+      copilotPayload("preToolUse"),
+      warnEnv,
+      dependencies([malicious], warnEvents),
+    ),
+    {},
+  );
+  assert.deepEqual(
+    await runVSCodeCopilotHook(
+      "postToolUse",
+      copilotPayload("postToolUse"),
+      warnEnv,
+      dependencies([malicious], warnEvents),
+    ),
+    { additionalContext: SAFE_WARN_MESSAGE },
+  );
+  assert.deepEqual(
+    warnEvents.map((event) => [event.warnDelivery, event.nativeAction]),
+    [
+      ["unsupported", "allowed"],
+      ["unsupported", "allowed"],
+      ["delivered", "warning_context_returned"],
+    ],
+  );
+});
+
+test("sessionStart only observes and never classifies in either schema", async () => {
+  const calls: any[] = [];
+  const observed: unknown[] = [];
+  const deps = {
+    ...dependencies([], [], calls),
+    workspaceObserver: async (cwd: unknown) => { observed.push(cwd); },
+  };
+  assert.deepEqual(
+    await dispatchVSCodeHook("sessionStart", payload("SessionStart"), BASE_ENV, deps),
+    {},
+  );
+  assert.deepEqual(
+    await dispatchVSCodeHook("sessionStart", copilotPayload("sessionStart"), BASE_ENV, deps),
+    {},
+  );
+  assert.deepEqual(observed, ["/tmp/project", "/tmp/project"]);
+  assert.equal(calls.filter((call) => call.text).length, 0);
+});
+
 test("governance and provenance use one VS Code host identity", () => {
   const userTarget = buildHookTarget("UserPromptSubmit", payload("UserPromptSubmit"));
   const toolTarget = buildHookTarget("PreToolUse", {
@@ -235,7 +533,24 @@ test("governance and provenance use one VS Code host identity", () => {
   });
   assert.deepEqual(governanceContext(toolTarget), {
     agent: "vscode",
-    resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+    resource: { kind: "mcp_tool", id: "create_issue", parentId: "github" },
+  });
+  assert.deepEqual(withProvenance(
+    { silmaril: { integration: "silmaril-vscode-firewall" } },
+    undefined,
+    governanceContext(toolTarget),
+  ), {
+    silmaril: {
+      integration: "silmaril-vscode-firewall",
+      provenance: {
+        schema_version: 1,
+        harness: "vscode",
+      },
+      governance: {
+        agent: "vscode",
+        resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+      },
+    },
   });
   assert.deepEqual(withProvenance({
     silmaril: { provenance: { harness: "spoofed", device_name: "spoofed-host" } },
@@ -371,6 +686,82 @@ test("concurrent workspace observations preserve every workspace", async () => {
   );
 });
 
+test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", async () => {
+  const requests: Array<Record<string, any>> = [];
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      prediction: "BENIGN",
+      score: 0.01,
+      threshold: 0.5,
+    }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const env = {
+      ...BASE_ENV,
+      SILMARIL_API_URL: `http://127.0.0.1:${address.port}/classify`,
+      SILMARIL_MODE: "shadow",
+    };
+    const deps: RuntimeDependencies = {
+      firewallConstructor: Firewall as unknown as RuntimeDependencies["firewallConstructor"],
+      evidenceEmitter: async () => undefined,
+      workspaceObserver: async () => undefined,
+      deviceName: () => undefined,
+    };
+    await runVSCodeHook("UserPromptSubmit", payload("UserPromptSubmit"), env, deps);
+    await runVSCodeHook("PreToolUse", payload("PreToolUse"), env, deps);
+    const mcpPayload = {
+      ...payload("PreToolUse"),
+      tool_name: "mcp__github__create_issue",
+    };
+    await runVSCodeHook("PreToolUse", mcpPayload, env, deps);
+    await runVSCodeHook("PreToolUse", mcpPayload, env, deps);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+
+  assert.equal(requests.length, 4);
+  assert.deepEqual(requests.map((request) => request.resource), [
+    { kind: "agent", id: "vscode" },
+    { kind: "tool", id: "runTerminalCommand" },
+    { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+    { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+  ]);
+  const firstMcpRequest = requests[2];
+  const secondMcpRequest = requests[3];
+  assert.ok(firstMcpRequest && secondMcpRequest);
+  assert.deepEqual(
+    firstMcpRequest.metadata.silmaril.governance,
+    {
+      agent: "vscode",
+      resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+    },
+  );
+  assert.equal(firstMcpRequest.metadata.silmaril.sdk_version, "0.8.2");
+  assert.equal(firstMcpRequest.metadata.vscodeHookRuntime, "local");
+  assert.equal(Object.hasOwn(firstMcpRequest.resource, "parentId"), false);
+  assert.equal(
+    Object.hasOwn(firstMcpRequest.metadata.silmaril.governance.resource, "parentId"),
+    false,
+  );
+  assert.equal(
+    firstMcpRequest.metadata.silmaril.request_id,
+    secondMcpRequest.metadata.silmaril.request_id,
+  );
+  assert.doesNotMatch(JSON.stringify(requests), /"parentId"/u);
+});
+
 test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../plugin.json", import.meta.url), "utf8"));
@@ -382,26 +773,67 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     new URL("../scripts/run-hook.sh", import.meta.url),
     "utf8",
   );
-  assert.equal(packageJson.version, "0.2.4");
+  assert.equal(packageJson.version, "0.3.0");
   assert.equal(pluginJson.$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
   assert.equal(pluginJson.name, "silmaril-vscode-firewall");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.7.2");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
+  assert.equal(hooks.version, 1);
   assert.deepEqual(Object.keys(hooks.hooks), [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
+    "sessionStart",
+    "userPromptSubmitted",
+    "preToolUse",
+    "postToolUse",
   ]);
-  assert.ok(Object.values(hooks.hooks).every((entries: any) => (
-    entries[0].osx.includes("${PLUGIN_ROOT}/scripts/run-hook.sh")
-    && entries[0].command === undefined
-    && entries[0].linux === undefined
-    && entries[0].windows === undefined
-  )));
+  for (const [event, entries] of Object.entries(hooks.hooks) as Array<[string, any[]]>) {
+    assert.equal(entries.length, 1);
+    assert.equal(
+      entries[0].command,
+      `"${"${PLUGIN_ROOT}"}/scripts/run-hook.sh" dispatch ${event}`,
+    );
+    assert.equal(entries[0].timeoutSec, 12);
+    assert.equal(entries[0].timeout, undefined);
+  }
   assert.match(launcher, /stat -f '%u %Lp'/u);
   assert.match(launcher, /\[ -L "\$\{runtime_file\}" \]/u);
   assert.match(launcher, /\[ -L "\$\{node_path\}" \]/u);
+  assert.match(launcher, /"\$@"/u);
+});
+
+test("private launcher safely handles plugin paths with spaces and both CLI forms", async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "silmaril launcher ")));
+  const home = path.join(root, "home");
+  const pluginPath = path.join(root, "plugin path with spaces");
+  const repository = await realpath(new URL("../", import.meta.url));
+  await mkdir(path.join(pluginPath, "dist"), { recursive: true });
+  await copyFile(
+    path.join(repository, "dist", "vscode-hook.js"),
+    path.join(pluginPath, "dist", "vscode-hook.js"),
+  );
+  await mkdir(path.join(home, ".vscode"), { recursive: true });
+  await writeFile(
+    path.join(home, ".vscode", "silmaril-firewall-node-path"),
+    `${process.execPath}\n`,
+    { mode: 0o600 },
+  );
+  const launcher = path.join(repository, "scripts", "run-hook.sh");
+  const env = { ...process.env, HOME: home, PLUGIN_ROOT: pluginPath };
+
+  const dispatched = spawnSync(launcher, ["dispatch", "sessionStart"], {
+    input: JSON.stringify(copilotPayload("sessionStart")),
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(dispatched.status, 0, dispatched.stderr);
+  assert.deepEqual(JSON.parse(dispatched.stdout), {});
+
+  const legacy = spawnSync(launcher, ["SessionStart"], {
+    input: JSON.stringify(payload("SessionStart")),
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(legacy.status, 0, legacy.stderr);
+  assert.deepEqual(JSON.parse(legacy.stdout), {});
 });
 
 test("classify metadata includes the mac computer name without an endpoint id", async () => {
