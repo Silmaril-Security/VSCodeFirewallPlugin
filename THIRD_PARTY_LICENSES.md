@@ -1,0 +1,19 @@
+# Third-party licenses
+
+## @silmaril-security/sdk 0.8.2
+
+The committed `dist/vscode-hook.js` bundle includes
+`@silmaril-security/sdk` 0.8.2 under these terms:
+
+> PROPRIETARY AND CONFIDENTIAL
+>
+> Copyright (c) 2024-2025 Silmaril Security Inc. All rights reserved.
+>
+> This software and its documentation are proprietary to Silmaril Security Inc.
+> Unauthorized copying, distribution, modification, or use of this software,
+> in whole or in part, is strictly prohibited without the express written
+> permission of Silmaril Security Inc.
+>
+> This software is provided "AS IS" without warranty of any kind, express or
+> implied, including but not limited to the warranties of merchantability,
+> fitness for a particular purpose, and noninfringement.

@@ -1,31 +1,32 @@
 {
+  "version": 1,
   "hooks": {
-    "SessionStart": [
+    "sessionStart": [
       {
         "type": "command",
-        "osx": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" SessionStart",
-        "timeout": 12
+        "command": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" dispatch sessionStart",
+        "timeoutSec": 12
       }
     ],
-    "UserPromptSubmit": [
+    "userPromptSubmitted": [
       {
         "type": "command",
-        "osx": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" UserPromptSubmit",
-        "timeout": 12
+        "command": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" dispatch userPromptSubmitted",
+        "timeoutSec": 12
       }
     ],
-    "PreToolUse": [
+    "preToolUse": [
       {
         "type": "command",
-        "osx": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" PreToolUse",
-        "timeout": 12
+        "command": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" dispatch preToolUse",
+        "timeoutSec": 12
       }
     ],
-    "PostToolUse": [
+    "postToolUse": [
       {
         "type": "command",
-        "osx": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" PostToolUse",
-        "timeout": 12
+        "command": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" dispatch postToolUse",
+        "timeoutSec": 12
       }
     ]
   }

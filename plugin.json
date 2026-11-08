@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "silmaril-vscode-firewall",
-  "description": "Silmaril Firewall protection for local VS Code agent harnesses.",
-  "version": "0.2.4",
+  "description": "Silmaril Firewall protection for VS Code Local and Copilot agent harnesses.",
+  "version": "0.3.0",
   "author": {
     "name": "Silmaril Security",
     "url": "https://www.silmaril.dev"

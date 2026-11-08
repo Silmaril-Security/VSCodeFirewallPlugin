@@ -57,7 +57,13 @@ try {
         SILMARIL_LOCAL_EVENT_DIR: "/dev/null/silmaril-deadline-test",
       };
       const started = performance.now();
-      await hook.runVSCodeHook("UserPromptSubmit", { prompt: "synthetic test" }, env);
+      await hook.runVSCodeHook("UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "deadline-test",
+        timestamp: "2026-11-08T00:00:00.000Z",
+        cwd: "/tmp",
+        prompt: "synthetic test",
+      }, env);
       assert.deepEqual(deadlines, [expected], "one deadline spans the complete classification");
       assert.equal(attempts, 1, "deadline stops classification before another request");
       if (status === "stalled-disposal") {
