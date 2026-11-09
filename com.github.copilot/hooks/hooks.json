@@ -15,6 +15,13 @@
         "timeoutSec": 12
       }
     ],
+    "userPromptTransformed": [
+      {
+        "type": "command",
+        "command": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" dispatch userPromptTransformed",
+        "timeoutSec": 12
+      }
+    ],
     "preToolUse": [
       {
         "type": "command",

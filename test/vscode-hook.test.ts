@@ -8,6 +8,8 @@ import path from "node:path";
 import test from "node:test";
 import { Firewall } from "@silmaril-security/sdk";
 import {
+  MAX_SAFE_REPLACEMENT_BYTES,
+  PLUGIN_NAME,
   PLUGIN_VERSION,
   SAFE_BLOCK_MESSAGE,
   SAFE_WARN_MESSAGE,
@@ -107,6 +109,12 @@ function copilotPayload(event: VSCodeCopilotEventName): Record<string, unknown> 
       return { ...base, source: "new" };
     case "userPromptSubmitted":
       return { ...base, prompt: "user prompt" };
+    case "userPromptTransformed":
+      return {
+        ...base,
+        prompt: "user prompt",
+        transformedPrompt: "runtime-transformed user prompt",
+      };
     case "preToolUse":
       return {
         ...base,
@@ -306,17 +314,17 @@ test("dispatch selects one validated nonmixed runtime schema and classifies once
   assert.equal(calls.filter((call) => call.text).length, 2);
 });
 
-test("request IDs preserve native Copilot timestamps and Local tool IDs", async () => {
+test("request IDs preserve transformed Copilot identity and Local tool IDs", async () => {
   const calls: any[] = [];
   const deps = dependencies(
     Array.from({ length: 7 }, () => ({ prediction: "BENIGN", score: 0.01, threshold: 0.5 })),
     [],
     calls,
   );
-  const shared = copilotPayload("userPromptSubmitted");
-  await runVSCodeCopilotHook("userPromptSubmitted", shared, BASE_ENV, deps);
-  await runVSCodeCopilotHook("userPromptSubmitted", { ...shared }, BASE_ENV, deps);
-  await runVSCodeCopilotHook("userPromptSubmitted", {
+  const shared = copilotPayload("userPromptTransformed");
+  await runVSCodeCopilotHook("userPromptTransformed", shared, BASE_ENV, deps);
+  await runVSCodeCopilotHook("userPromptTransformed", { ...shared }, BASE_ENV, deps);
+  await runVSCodeCopilotHook("userPromptTransformed", {
     ...shared,
     timestamp: (shared.timestamp as number) + 1,
   }, BASE_ENV, deps);
@@ -336,10 +344,173 @@ test("request IDs preserve native Copilot timestamps and Local tool IDs", async 
     .filter((call) => call.text)
     .map((call) => call.options.requestId);
   assert.equal(requestIds.length, 6);
-  assert.equal(requestIds[0], requestIds[1], "same shared event and timestamp is stable");
+  assert.equal(requestIds[0], requestIds[1], "same transformed event and timestamp is stable");
   assert.notEqual(requestIds[1], requestIds[2], "different shared timestamps are distinct");
   assert.equal(requestIds[3], requestIds[4], "Local tool_use_id takes precedence over timestamp");
   assert.notEqual(requestIds[4], requestIds[5], "different Local tool_use_id values are distinct");
+});
+
+test("transformed prompts preserve exact bytes and use only bounded replacement", async () => {
+  const exact = " \tprimary\r\npreceding\u0000unicode \u03b2 \n";
+  const input = {
+    ...copilotPayload("userPromptTransformed"),
+    sessionId: " session-1 ",
+    timestamp: 1_788_307_200_000,
+    prompt: "visible original prompt",
+    transformedPrompt: exact,
+  };
+  const calls: any[] = [];
+  assert.deepEqual(
+    await dispatchVSCodeHook(
+      "userPromptTransformed",
+      input,
+      BASE_ENV,
+      dependencies([{ prediction: "BENIGN" }], [], calls),
+    ),
+    {},
+  );
+  const classification = calls.find((call) => call.text);
+  assert.equal(classification.text, exact);
+  assert.equal(classification.options.metadata.vscodeHookEvent, "userPromptTransformed");
+  assert.equal(classification.options.metadata.sessionId, "session-1");
+  assert.equal(classification.options.metadata.conversationId, "session-1");
+  assert.equal(
+    classification.options.requestId,
+    `${PLUGIN_NAME}-${createHash("sha256").update([
+      "session-1",
+      "userPromptTransformed",
+      String(input.timestamp),
+      createHash("sha256").update(input.prompt).digest("hex"),
+      createHash("sha256").update(exact).digest("hex"),
+    ].join("\u0000")).digest("hex")}`,
+  );
+  const emptyCalls: any[] = [];
+  assert.deepEqual(
+    await runVSCodeCopilotHook(
+      "userPromptTransformed",
+      { ...input, transformedPrompt: "" },
+      BASE_ENV,
+      dependencies([{ prediction: "BENIGN" }], [], emptyCalls),
+    ),
+    {},
+  );
+  assert.equal(
+    emptyCalls.find((call) => Object.hasOwn(call, "text"))?.text,
+    "",
+  );
+
+  const events: any[] = [];
+  const blocked = await dispatchVSCodeHook(
+    "userPromptTransformed",
+    input,
+    { ...BASE_ENV, SILMARIL_MODE: "block" },
+    dependencies([{ prediction: "MALICIOUS" }], events),
+  );
+  assert.deepEqual(blocked, { modifiedTransformedPrompt: SAFE_BLOCK_MESSAGE });
+  assert.deepEqual(Object.keys(blocked), ["modifiedTransformedPrompt"]);
+  assert.ok(Buffer.byteLength(SAFE_BLOCK_MESSAGE, "utf8") <= MAX_SAFE_REPLACEMENT_BYTES);
+  assert.doesNotMatch(JSON.stringify(blocked), /primary|preceding|unicode/u);
+  assert.equal(events[0].policyDecision, "block");
+  assert.equal(events[0].nativeAction, "content_replaced");
+  assert.equal(events[0].evidenceTruth, "native_response_returned");
+
+  const warnEvents: any[] = [];
+  assert.deepEqual(
+    await dispatchVSCodeHook(
+      "userPromptTransformed",
+      input,
+      { ...BASE_ENV, SILMARIL_MODE: "warn" },
+      dependencies([{ prediction: "MALICIOUS" }], warnEvents),
+    ),
+    {},
+  );
+  assert.equal(warnEvents[0].warnDelivery, "unsupported");
+  assert.equal(warnEvents[0].nativeAction, "allowed");
+});
+
+test("transformed prompt identities are deterministic for batch, retry, and resume fixtures", async () => {
+  const primary = copilotPayload("userPromptTransformed");
+  const preceding = {
+    ...primary,
+    prompt: "preceding prompt",
+    transformedPrompt: "preceding model-facing bytes",
+  };
+  const calls: any[] = [];
+  const deps = dependencies(
+    Array.from({ length: 4 }, () => ({ prediction: "BENIGN" })),
+    [],
+    calls,
+  );
+  for (const current of [preceding, primary, { ...primary }, { ...primary, sessionId: "session-2" }]) {
+    assert.deepEqual(
+      await runVSCodeCopilotHook("userPromptTransformed", current, BASE_ENV, deps),
+      {},
+    );
+  }
+  const classifications = calls.filter((call) => call.text);
+  assert.deepEqual(
+    classifications.map((call) => call.text),
+    [
+      "preceding model-facing bytes",
+      "runtime-transformed user prompt",
+      "runtime-transformed user prompt",
+      "runtime-transformed user prompt",
+    ],
+  );
+  assert.notEqual(classifications[0].options.requestId, classifications[1].options.requestId);
+  assert.equal(classifications[1].options.requestId, classifications[2].options.requestId);
+  assert.notEqual(classifications[2].options.requestId, classifications[3].options.requestId);
+
+  const blockEnv = { ...BASE_ENV, SILMARIL_MODE: "block" };
+  const first = await runVSCodeCopilotHook(
+    "userPromptTransformed",
+    primary,
+    blockEnv,
+    dependencies([{ prediction: "MALICIOUS" }]),
+  );
+  const replay = await runVSCodeCopilotHook(
+    "userPromptTransformed",
+    { ...primary },
+    blockEnv,
+    dependencies([{ prediction: "MALICIOUS" }]),
+  );
+  assert.deepEqual(first, { modifiedTransformedPrompt: SAFE_BLOCK_MESSAGE });
+  assert.deepEqual(replay, first);
+});
+
+test("transformed dispatch accepts only the strict Copilot schema", async () => {
+  const valid = copilotPayload("userPromptTransformed");
+  const malformed: Record<string, unknown>[] = [
+    payload("UserPromptSubmit"),
+    { ...valid, hook_event_name: "UserPromptSubmit" },
+    { ...valid, sessionId: " \t" },
+    { ...valid, timestamp: 1.5 },
+    { ...valid, timestamp: Number.POSITIVE_INFINITY },
+    { ...valid, cwd: 123 },
+    { ...valid, prompt: 123 },
+    { ...valid, transformedPrompt: 123 },
+    { ...valid, toolName: "mixed" },
+  ];
+  for (const field of ["sessionId", "timestamp", "cwd", "prompt", "transformedPrompt"]) {
+    const missing = { ...valid };
+    delete missing[field];
+    malformed.push(missing);
+  }
+  const calls: any[] = [];
+  const events: any[] = [];
+  for (const input of malformed) {
+    assert.deepEqual(
+      await dispatchVSCodeHook(
+        "userPromptTransformed",
+        input,
+        BASE_ENV,
+        dependencies([], events, calls),
+      ),
+      {},
+    );
+  }
+  assert.equal(calls.length, 0);
+  assert.equal(events.length, 0);
 });
 
 test("Local dispatch accepts optional common fields but rejects malformed mixed payloads", async () => {
@@ -398,6 +569,8 @@ test("numeric values in documented string fields fail open without classificatio
   const events: any[] = [];
   const deps = dependencies([], events, calls);
   const malformed: Array<[VSCodeCopilotEventName, Record<string, unknown>]> = [
+    ["userPromptTransformed", { ...copilotPayload("userPromptTransformed"), timestamp: 1.5 }],
+    ["userPromptTransformed", { ...copilotPayload("userPromptTransformed"), session_id: "mixed" }],
     ["userPromptSubmitted", { ...copilotPayload("userPromptSubmitted"), sessionId: 123 }],
     ["userPromptSubmitted", { ...copilotPayload("userPromptSubmitted"), cwd: 123 }],
     ["preToolUse", { ...copilotPayload("preToolUse"), toolName: 123 }],
@@ -421,13 +594,24 @@ test("Copilot outputs use only documented event-specific controls", async () => 
 
   assert.deepEqual(
     await runVSCodeCopilotHook(
-      "userPromptSubmitted",
-      copilotPayload("userPromptSubmitted"),
+      "userPromptTransformed",
+      copilotPayload("userPromptTransformed"),
       blockEnv,
       dependencies([malicious], blockEvents),
     ),
+    { modifiedTransformedPrompt: SAFE_BLOCK_MESSAGE },
+  );
+  const legacyCalls: any[] = [];
+  assert.deepEqual(
+    await runVSCodeCopilotHook(
+      "userPromptSubmitted",
+      copilotPayload("userPromptSubmitted"),
+      blockEnv,
+      dependencies([malicious], [], legacyCalls),
+    ),
     {},
   );
+  assert.equal(legacyCalls.filter((call) => call.text).length, 0);
   assert.deepEqual(
     await runVSCodeCopilotHook(
       "preToolUse",
@@ -454,9 +638,9 @@ test("Copilot outputs use only documented event-specific controls", async () => 
       },
     },
   );
-  assert.equal(blockEvents[0].policyDecision, "unavailable");
-  assert.equal(blockEvents[0].blockUnavailable, true);
-  assert.equal(blockEvents[0].nativeAction, "allowed");
+  assert.equal(blockEvents[0].policyDecision, "block");
+  assert.equal(blockEvents[0].blockUnavailable, undefined);
+  assert.equal(blockEvents[0].nativeAction, "content_replaced");
   assert.equal(blockEvents[1].policyDecision, "block");
   assert.equal(blockEvents[1].nativeAction, "block_returned");
   assert.equal(blockEvents[2].nativeAction, "content_replaced");
@@ -466,8 +650,8 @@ test("Copilot outputs use only documented event-specific controls", async () => 
   const warnEvents: any[] = [];
   assert.deepEqual(
     await runVSCodeCopilotHook(
-      "userPromptSubmitted",
-      copilotPayload("userPromptSubmitted"),
+      "userPromptTransformed",
+      copilotPayload("userPromptTransformed"),
       warnEnv,
       dependencies([malicious], warnEvents),
     ),
@@ -725,18 +909,25 @@ test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", asyn
     };
     await runVSCodeHook("PreToolUse", mcpPayload, env, deps);
     await runVSCodeHook("PreToolUse", mcpPayload, env, deps);
+    await runVSCodeCopilotHook(
+      "userPromptTransformed",
+      copilotPayload("userPromptTransformed"),
+      env,
+      deps,
+    );
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
   }
 
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 5);
   assert.deepEqual(requests.map((request) => request.resource), [
     { kind: "agent", id: "vscode" },
     { kind: "tool", id: "runTerminalCommand" },
     { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
     { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+    { kind: "agent", id: "vscode" },
   ]);
   const firstMcpRequest = requests[2];
   const secondMcpRequest = requests[3];
@@ -759,6 +950,11 @@ test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", asyn
     firstMcpRequest.metadata.silmaril.request_id,
     secondMcpRequest.metadata.silmaril.request_id,
   );
+  const transformedRequest = requests[4];
+  assert.ok(transformedRequest);
+  assert.equal(transformedRequest.metadata.vscodeHookEvent, "userPromptTransformed");
+  assert.equal(transformedRequest.metadata.sessionId, "session-1");
+  assert.equal(transformedRequest.metadata.conversationId, "session-1");
   assert.doesNotMatch(JSON.stringify(requests), /"parentId"/u);
 });
 
@@ -773,7 +969,7 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     new URL("../scripts/run-hook.sh", import.meta.url),
     "utf8",
   );
-  assert.equal(packageJson.version, "0.3.0");
+  assert.equal(packageJson.version, "0.3.1");
   assert.equal(pluginJson.$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
   assert.equal(pluginJson.name, "silmaril-vscode-firewall");
   assert.equal(pluginJson.version, packageJson.version);
@@ -782,6 +978,7 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
   assert.deepEqual(Object.keys(hooks.hooks), [
     "sessionStart",
     "userPromptSubmitted",
+    "userPromptTransformed",
     "preToolUse",
     "postToolUse",
   ]);
