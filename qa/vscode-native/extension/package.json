@@ -1,0 +1,62 @@
+{
+  "name": "silmaril-vscode-native-qa",
+  "displayName": "Silmaril VS Code Native QA",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "silmaril-native-qa",
+  "engines": {
+    "vscode": "^1.145.2"
+  },
+  "main": "./extension.cjs",
+  "activationEvents": [
+    "*"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "silmaril-native-qa-dummy-8d724ae7",
+        "displayName": "Silmaril Native QA Dummy"
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "silmaril_native_qa_preblock_8d724ae7",
+        "toolReferenceName": "silmaril_native_qa_preblock_8d724ae7",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Silmaril Native QA Pre-block Tool",
+        "modelDescription": "Synthetic native QA tool that creates only a private marker file.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "marker": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "marker"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "silmaril_native_qa_posttool_8d724ae7",
+        "toolReferenceName": "silmaril_native_qa_posttool_8d724ae7",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Silmaril Native QA Post-tool Tool",
+        "modelDescription": "Synthetic native QA tool that returns only a fixed poison marker.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "marker": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "marker"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

@@ -22,6 +22,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "npm run typecheck",
     "test": "npm run build && node --import tsx --test test/*.test.ts && node scripts/test-classification-deadline.mjs",
+    "test:native:vscode": "node scripts/vscode-native-qualification.mjs",
     "pack:dry": "npm pack --dry-run",
     "test:deadline": "npm run build && node scripts/test-classification-deadline.mjs"
   },
