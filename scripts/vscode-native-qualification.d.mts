@@ -229,6 +229,18 @@ export function buildNativeLaunchArgs(options: {
   proxyUrl: string;
 }): string[];
 
+export function resolveNativeHandoffPaths(options: {
+  ownedProfileRoot: string;
+  userData: string;
+  profileSettingsPath: string;
+  workspaceFile: string;
+}): Promise<{
+  profileResolvedPath: string;
+  profileSettingsPath: string;
+  userDataPath: string;
+  workspaceFilePath: string;
+}>;
+
 export function buildNativeProfileSettings(options: {
   candidate: string;
   proxyUrl: string;

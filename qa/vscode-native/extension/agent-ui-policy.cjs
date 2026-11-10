@@ -122,8 +122,14 @@ function classifyFreshProfileUiFiles({
   };
 }
 
+function classificationAllowsNativePass(classification) {
+  return classification?.expected === true
+    && classification?.expectedUiTransitionObserved === true;
+}
+
 module.exports = {
   AI_SETTING,
+  classificationAllowsNativePass,
   classifyExactSettingDelta,
   classifyFreshProfileUiFiles,
   sha256Bytes,

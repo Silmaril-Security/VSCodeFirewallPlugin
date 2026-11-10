@@ -36,7 +36,10 @@ export {
 } from "./vscode-native-fresh-profile.mjs";
 
 const require = createRequire(import.meta.url);
-const { classifyFreshProfileUiFiles } = require(
+const {
+  classificationAllowsNativePass,
+  classifyFreshProfileUiFiles,
+} = require(
   "../qa/vscode-native/extension/agent-ui-policy.cjs",
 );
 const { parseProviderJournalBytes } = require(
@@ -1268,7 +1271,20 @@ async function recordReadyHandoff({
   identityPromise,
   isSettled,
 }) {
-  const deadline = Date.now() + readyTimeoutMs;
+  const startedAtMs = Date.now();
+  const deadline = startedAtMs + readyTimeoutMs;
+  const handoffDiagnostic = {
+    label: readinessDescription,
+    timeoutMs: readyTimeoutMs,
+    timeOrigin: "owned-vscode-process-spawn-event",
+    startedAt: new Date(startedAtMs).toISOString(),
+    deadlineAt: new Date(deadline).toISOString(),
+  };
+  const handoffError = (message) => {
+    const error = new Error(message);
+    error.handoffDiagnostic = handoffDiagnostic;
+    return error;
+  };
   while (Date.now() < deadline) {
     if (await pathExists(readyPath)) {
       try {
@@ -1280,6 +1296,7 @@ async function recordReadyHandoff({
           ...pendingContext,
           appPID: pid,
           startIdentity: await identityPromise,
+          launcherObserver: handoffDiagnostic,
           ready,
         });
         return;
@@ -1288,11 +1305,15 @@ async function recordReadyHandoff({
       }
     }
     if (isSettled()) {
-      throw new Error(`VS Code exited before ${readinessDescription} was ready`);
+      throw handoffError(
+        `VS Code exited before ${readinessDescription} was ready`,
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Timed out waiting for ${readinessDescription} ready marker`);
+  throw handoffError(
+    `Timed out waiting for ${readinessDescription} ready marker; timeout origin ${handoffDiagnostic.timeOrigin}, started ${handoffDiagnostic.startedAt}, deadline ${handoffDiagnostic.deadlineAt}, duration ${readyTimeoutMs}ms`,
+  );
 }
 
 async function monitorExtensionCapture({
@@ -2196,6 +2217,9 @@ function errorReceipt(error) {
     name: error instanceof Error ? error.name : "Error",
     message: error instanceof Error ? error.message : String(error),
     stack: error instanceof Error ? error.stack : undefined,
+    ...(error?.handoffDiagnostic
+      ? { handoffDiagnostic: error.handoffDiagnostic }
+      : {}),
   };
 }
 
@@ -2277,6 +2301,81 @@ async function pathExists(filePath) {
     if (error?.code === "ENOENT") return false;
     throw error;
   });
+}
+
+export async function resolveNativeHandoffPaths({
+  ownedProfileRoot,
+  userData,
+  profileSettingsPath,
+  workspaceFile,
+}) {
+  const profileDirectory = path.dirname(profileSettingsPath);
+  const candidates = [
+    ["user-data", userData, "directory"],
+    ["profile", profileDirectory, "directory"],
+    ["profile settings", profileSettingsPath, "file"],
+    ["workspace file", workspaceFile, "file"],
+  ];
+  for (const [label, candidate, kind] of candidates) {
+    assert.ok(path.isAbsolute(candidate), `${label} path must be absolute`);
+    const info = await lstat(candidate);
+    assert.equal(
+      info.isSymbolicLink(),
+      false,
+      `${label} path must not be a symbolic link`,
+    );
+    assert.equal(
+      kind === "directory" ? info.isDirectory() : info.isFile(),
+      true,
+      `${label} path must be a ${kind}`,
+    );
+  }
+  const [
+    rootResolved,
+    userDataPath,
+    profileResolvedPath,
+    resolvedProfileSettingsPath,
+    workspaceFilePath,
+  ] = await Promise.all([
+    realpath(ownedProfileRoot),
+    realpath(userData),
+    realpath(profileDirectory),
+    realpath(profileSettingsPath),
+    realpath(workspaceFile),
+  ]);
+  for (const [label, candidate] of [
+    ["user-data", userDataPath],
+    ["profile", profileResolvedPath],
+    ["profile settings", resolvedProfileSettingsPath],
+    ["workspace file", workspaceFilePath],
+  ]) {
+    assert.equal(
+      pathIsWithin(rootResolved, candidate),
+      true,
+      `${label} path resolves outside the synthetic profile`,
+    );
+  }
+  assert.equal(
+    path.dirname(resolvedProfileSettingsPath),
+    profileResolvedPath,
+    "Profile settings file does not belong to the resolved private profile",
+  );
+  assert.equal(
+    path.dirname(profileResolvedPath),
+    userDataPath,
+    "Resolved private profile is not the user-data User directory",
+  );
+  assert.equal(
+    path.basename(profileResolvedPath),
+    "User",
+    "Resolved private profile directory must be userData/User",
+  );
+  return {
+    profileResolvedPath,
+    profileSettingsPath: resolvedProfileSettingsPath,
+    userDataPath,
+    workspaceFilePath,
+  };
 }
 
 export function buildNativeLaunchArgs({
@@ -2726,7 +2825,17 @@ export async function qualifyNativeVSCode(env = process.env) {
       evidence,
       "normal-ui-shared-model-ready.json",
     );
-    const profileResolvedPath = layout.root;
+    const {
+      profileResolvedPath,
+      profileSettingsPath,
+      userDataPath,
+      workspaceFilePath,
+    } = await resolveNativeHandoffPaths({
+      ownedProfileRoot: layout.root,
+      userData,
+      profileSettingsPath: settingsPath,
+      workspaceFile,
+    });
     const workspaceResolvedPath = await realpath(workspace);
     const existingLogDirectories = await listLogDirectoryNames(userData);
     receipt.profile = {
@@ -2739,8 +2848,11 @@ export async function qualifyNativeVSCode(env = process.env) {
       temporary,
       candidate,
       profileResolvedPath,
+      profileSettingsPath,
+      userDataPath,
       workspaceResolvedPath,
-      workspaceFile,
+      workspaceFile: workspaceFilePath,
+      workspaceFilePath,
       outputRoot: layout.root,
       windowTitle,
       settingsSha256: await sha256File(settingsPath),
@@ -2782,8 +2894,10 @@ export async function qualifyNativeVSCode(env = process.env) {
             SILMARIL_NATIVE_SESSION_ROUTE: policy.sessionRoute,
           }
         : {}),
-      SILMARIL_NATIVE_PROFILE_SETTINGS_PATH: settingsPath,
-      SILMARIL_NATIVE_WORKSPACE_FILE_PATH: workspaceFile,
+      SILMARIL_NATIVE_PROFILE_RESOLVED_PATH: profileResolvedPath,
+      SILMARIL_NATIVE_PROFILE_SETTINGS_PATH: profileSettingsPath,
+      SILMARIL_NATIVE_USER_DATA_PATH: userDataPath,
+      SILMARIL_NATIVE_WORKSPACE_FILE_PATH: workspaceFilePath,
       SILMARIL_NATIVE_USER_DATA: userData,
       SILMARIL_NATIVE_SYNTHETIC_DEVICE_ID: syntheticDeviceId,
       SILMARIL_NATIVE_WINDOW_TITLE: windowTitle,
@@ -2829,6 +2943,14 @@ export async function qualifyNativeVSCode(env = process.env) {
       false,
       "Native QA must not select a plaintext password store",
     );
+    const handoffPathContext = {
+      profileResolvedPath,
+      profileSettingsPath,
+      userDataPath,
+      workspaceResolvedPath,
+      workspaceFilePath,
+      workspaceFile: workspaceFilePath,
+    };
     const handoffs = [];
     if (pendingTrustPath) {
       handoffs.push({
@@ -2841,9 +2963,7 @@ export async function qualifyNativeVSCode(env = process.env) {
           appPath: resolvedApp,
           appVersion: identity.version,
           appCommit: identity.commit,
-          profileResolvedPath,
-          workspaceResolvedPath,
-          workspaceFile: await realpath(workspaceFile),
+          ...handoffPathContext,
           windowTitle,
           receiptPath,
         },
@@ -2860,9 +2980,7 @@ export async function qualifyNativeVSCode(env = process.env) {
           appPath: resolvedApp,
           appVersion: identity.version,
           appCommit: identity.commit,
-          profileResolvedPath,
-          workspaceResolvedPath,
-          workspaceFile: await realpath(workspaceFile),
+          ...handoffPathContext,
           windowTitle,
           receiptPath,
           sourceProof: receipt.agentEnablement,
@@ -2894,9 +3012,7 @@ export async function qualifyNativeVSCode(env = process.env) {
           appPath: resolvedApp,
           appVersion: identity.version,
           appCommit: identity.commit,
-          profileResolvedPath,
-          workspaceResolvedPath,
-          workspaceFile: await realpath(workspaceFile),
+          ...handoffPathContext,
           windowTitle,
           receiptPath,
           sourceProof: receipt.agentEnablement,
@@ -2929,9 +3045,7 @@ export async function qualifyNativeVSCode(env = process.env) {
           appPath: resolvedApp,
           appVersion: identity.version,
           appCommit: identity.commit,
-          profileResolvedPath,
-          workspaceResolvedPath,
-          workspaceFile: await realpath(workspaceFile),
+          ...handoffPathContext,
           windowTitle,
           receiptPath,
           sourceProof: receipt.source.sharedRouteExperiment,
@@ -3068,11 +3182,7 @@ export async function qualifyNativeVSCode(env = process.env) {
     ) {
       receipt.process = error.processReceipt;
     }
-    receipt.error = {
-      name: error instanceof Error ? error.name : "Error",
-      message: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
-    };
+    receipt.error = errorReceipt(error);
   } finally {
     if (classifier) receipt.classifierRequests = classifier.requests;
     if (proxy) receipt.outboundDestinations = proxy.destinations;
@@ -3274,8 +3384,9 @@ export async function qualifyNativeVSCode(env = process.env) {
       } catch (error) {
         inspectionError = error;
       }
+      let restoration;
       try {
-        const restoration = await restoreFreshProfileFiles({
+        restoration = await restoreFreshProfileFiles({
           ownedProfileRoot: layout.root,
           settingsPath: freshRestore.settingsPath,
           settingsBytes: freshRestore.settingsBytes,
@@ -3285,31 +3396,42 @@ export async function qualifyNativeVSCode(env = process.env) {
           workspaceFileBytes: freshRestore.workspaceFileBytes,
         });
         receipt.freshProfile.configurationRestored = true;
+      } catch (restoreError) {
+        receipt.freshProfile.configurationRestored = false;
+        receipt.freshProfile.restorationError = errorReceipt(restoreError);
+        if (!failure) {
+          failure = restoreError;
+          receipt.error = receipt.freshProfile.restorationError;
+        }
+      }
+      if (restoration) {
         receipt.freshProfile.uiFileObservation = {
           checkedAfterOwnedProcessExit: true,
           archives,
           classification,
           restoration,
         };
-        if (inspectionError) throw inspectionError;
-        assert.equal(
-          classification.expected,
-          true,
-          "Normal UI made an unexpected synthetic settings, config, or workspace change; observed bytes were archived and originals restored",
-        );
-      } catch (restoreError) {
-        receipt.freshProfile.configurationRestored =
-          receipt.freshProfile.configurationRestored === true;
-        receipt.freshProfile.restorationError = {
-          name: restoreError instanceof Error ? restoreError.name : "Error",
-          message:
-            restoreError instanceof Error
-              ? restoreError.message
-              : String(restoreError),
-        };
-        if (!failure) {
-          failure = restoreError;
-          receipt.error = receipt.freshProfile.restorationError;
+        let observationFailure = inspectionError;
+        if (!observationFailure) {
+          try {
+            assert.equal(
+              classificationAllowsNativePass(classification),
+              true,
+              classification.expected
+                ? "Native PASS requires both exact normal-UI configuration deltas; unchanged setup files are a setup failure"
+                : "Normal UI made an unexpected synthetic settings, config, or workspace change; observed bytes were archived and originals restored",
+            );
+          } catch (error) {
+            observationFailure = error;
+          }
+        }
+        if (observationFailure) {
+          receipt.freshProfile.uiObservationError =
+            errorReceipt(observationFailure);
+          if (!failure) {
+            failure = observationFailure;
+            receipt.error = receipt.freshProfile.uiObservationError;
+          }
         }
       }
     } else if (freshRestore) {
