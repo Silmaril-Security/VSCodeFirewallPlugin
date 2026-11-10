@@ -3,10 +3,13 @@ import { access, chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 
 const HUMAN_UI_FLAG = "SILMARIL_VSCODE_QA_ALLOW_HUMAN_UI";
+const SESSION_ROUTE_ENV = "SILMARIL_NATIVE_SESSION_ROUTE";
+const SHARED_COPILOT_ROUTE = "shared-copilot";
 const HANDOFF_ENV = Object.freeze({
   trust: "NATIVE_TRUST_PENDING_PATH",
   disableAi: "NATIVE_AGENT_ENABLE_PENDING_PATH",
   workspaceAi: "NATIVE_WORKSPACE_AI_ENABLE_PENDING_PATH",
+  sharedModel: "NATIVE_SHARED_MODEL_PENDING_PATH",
 });
 const CHILD_ENV_ALLOWLIST = Object.freeze([
   "PATH",
@@ -31,10 +34,16 @@ export function pathIsWithin(root, candidate) {
 
 export function resolvePortableQaPolicy(env = process.env) {
   const flag = env[HUMAN_UI_FLAG];
+  const configuredRoute = env[SESSION_ROUTE_ENV];
   assert.ok(
     flag === undefined || flag === "1",
     `${HUMAN_UI_FLAG} must be omitted or exactly 1`,
   );
+  assert.ok(
+    configuredRoute === undefined || configuredRoute === SHARED_COPILOT_ROUTE,
+    `${SESSION_ROUTE_ENV} must be omitted or exactly ${SHARED_COPILOT_ROUTE}`,
+  );
+  const sessionRoute = configuredRoute ?? "legacy-local";
   const handoffs = Object.fromEntries(
     Object.entries(HANDOFF_ENV).map(([name, envName]) => [
       name,
@@ -51,28 +60,47 @@ export function resolvePortableQaPolicy(env = process.env) {
     }
     return {
       mode: "preflight",
+      sessionRoute,
       allowLaunch: false,
       allowNormalTrustHandoff: false,
       allowUiEnableHandoff: false,
+      requireSharedModelHandoff: false,
       handoffs,
     };
   }
+  const requiredHandoffs = sessionRoute === SHARED_COPILOT_ROUTE
+    ? new Set(Object.keys(HANDOFF_ENV))
+    : new Set(["trust", "disableAi", "workspaceAi"]);
   for (const [name, handoffPath] of Object.entries(handoffs)) {
+    if (!requiredHandoffs.has(name)) {
+      assert.equal(
+        handoffPath,
+        undefined,
+        `Legacy Local mode must not provide the ${name} handoff`,
+      );
+      continue;
+    }
     assert.ok(
       handoffPath && path.isAbsolute(handoffPath),
       `Human-UI mode requires an absolute ${name} handoff path`,
     );
   }
   assert.equal(
-    new Set(Object.values(handoffs).map((value) => path.resolve(value))).size,
-    3,
+    new Set(
+      Object.values(handoffs)
+        .filter((value) => value !== undefined)
+        .map((value) => path.resolve(value)),
+    ).size,
+    requiredHandoffs.size,
     "Human-UI handoff paths must be distinct",
   );
   return {
     mode: "human-ui",
+    sessionRoute,
     allowLaunch: true,
     allowNormalTrustHandoff: true,
     allowUiEnableHandoff: true,
+    requireSharedModelHandoff: sessionRoute === SHARED_COPILOT_ROUTE,
     handoffs,
   };
 }

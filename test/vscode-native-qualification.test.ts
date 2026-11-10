@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildMinimalChildEnvironment,
   buildNativeLaunchArgs,
+  buildNativeProfileSettings,
   byteReceipt,
   closeServer,
   collectStrings,
@@ -33,8 +34,10 @@ import {
   inspectNativeCjsMissingIdentifiers,
   inspectNormalUiAgentEnablement,
   inspectProviderJournal,
+  inspectSharedRouteSourceContracts,
   inspectSourceContracts,
   ownedProcessGroupExists,
+  qualifyNativeVSCode,
   resolvePortableQaPolicy,
   restoreFreshProfileFiles,
   settleOwnedProcessGroup,
@@ -44,6 +47,7 @@ import {
   validateProviderJournalCapture,
   validateQaToolManifest,
   validateSharedCallbackRoutes,
+  validateSharedExecutionRoute,
   waitForOwnedProcessGroup,
   writeFinalQualificationReceipt,
 } from "../scripts/vscode-native-qualification.mjs";
@@ -89,6 +93,50 @@ const { snapshotNativeState } = require(
     receipt: Record<string, any>,
     nativeState: Record<string, any> | undefined,
   ): Record<string, any>;
+};
+const {
+  modelSelectorForRoute,
+  modelSelectorFromPublicModel,
+  parseChatTurnRows,
+  readFreshProfileTurnRows,
+  validateFirstSharedTurnRows,
+  validateSelectionActionAttestation,
+  validateWrappedModels,
+} = require(
+  "../qa/vscode-native/extension/shared-route-policy.cjs",
+) as {
+  modelSelectorForRoute(
+    constants: { VENDOR: string; MODEL_ID: string },
+    route: string,
+  ): { vendor: string; id: string };
+  modelSelectorFromPublicModel(
+    model: { vendor: string; id: string },
+  ): { vendor: string; id: string };
+  parseChatTurnRows(
+    logs: Array<{ relativePath: string; text: string }>,
+  ): Array<Record<string, any>>;
+  readFreshProfileTurnRows(
+    userData: string,
+  ): Promise<Array<Record<string, any>>>;
+  validateFirstSharedTurnRows(
+    rows: Array<Record<string, any>>,
+  ): Record<string, any>;
+  validateSelectionActionAttestation(
+    value: Record<string, any>,
+    expectedModel: { vendor: string; id: string },
+  ): Record<string, any>;
+  validateWrappedModels(
+    models: Array<Record<string, any>>,
+    constants: { VENDOR: string; MODEL_ID: string },
+  ): {
+    source: string;
+    name: string;
+    vendor: string;
+    id: string;
+    family: string;
+    version: string;
+    maxInputTokens: number;
+  };
 };
 const {
   createProviderJournal,
@@ -399,6 +447,176 @@ test("native core route accepts only exact shared callback metadata", () => {
   );
 });
 
+test("shared execution requires wrapped selector, shared resources, and strict callbacks", () => {
+  const callbackProof = validateSharedCallbackRoutes(sharedRouteRows());
+  const modelId =
+    "silmaril-native-qa-dummy-8d724ae7/silmaril-native-qa-local-deterministic-8d724ae7";
+  const capture = {
+    sessionRoute: {
+      modelSelector: {
+        vendor: "agent-host-copilotcli",
+        id: modelId,
+      },
+      publicWrappedModel: {
+        vendor: "agent-host-copilotcli",
+        id: modelId,
+      },
+      selectionAttestation: {
+        executionProof: false,
+      },
+      firstTurnEvidence: {
+        source: "fresh-profile-renderer-logs",
+        firstTurn: {
+          sessionType: "agent-host-copilotcli",
+        },
+      },
+    },
+    providerRequests: Array.from({ length: 4 }, () => ({
+      model: { id: "silmaril-native-qa-local-deterministic-8d724ae7" },
+    })),
+  };
+  const turn = (index: number, sessionType = "agent-host-copilotcli") =>
+    `[ChatTTFP] end ${JSON.stringify({
+      interactionKind: "turn",
+      chatSessionId: `shared-${index}`,
+      sessionType,
+      agent: "copilotcli",
+      model: modelId,
+    })}`;
+  const combinedLogs = [
+    "startup empty session resource = vscode-chat-session://local/empty-startup",
+    "current session resource = vscode-chat-session://agent-host-copilotcli/shared-1",
+    ...Array.from({ length: 4 }, (_, index) => turn(index)),
+  ].join("\n");
+  const proof = validateSharedExecutionRoute({
+    sessionRoute: "shared-copilot",
+    combinedLogs,
+    callbackProof,
+    capture,
+  });
+  assert.equal(proof.execution, "verified");
+  assert.equal(proof.sessionType, "agent-host-copilotcli");
+  assert.equal(proof.selectionAttestationIsExecutionProof, false);
+  assert.equal(proof.firstTurnCheckpointObserved, true);
+
+  assert.throws(
+    () => validateSharedExecutionRoute({
+      sessionRoute: "legacy-local",
+      combinedLogs,
+      callbackProof,
+      capture,
+    }),
+    /Legacy Local configuration cannot satisfy/u,
+  );
+  assert.throws(
+    () => validateSharedExecutionRoute({
+      sessionRoute: "shared-copilot",
+      combinedLogs: `${combinedLogs}\n${turn(5, "local")}`,
+      callbackProof,
+      capture,
+    }),
+    /Mixed or Local/u,
+  );
+});
+
+test("first safe allow turn stops missing, Local, or mixed routes before later queries", async () => {
+  const row = (
+    sessionType: string,
+    epochMs: number,
+    chatSessionId: string,
+  ) => `[ChatTTFP] end ${JSON.stringify({
+    interactionKind: "turn",
+    sessionType,
+    epochMs,
+    chatSessionId,
+    agent: "copilotcli",
+    model: "synthetic-unit-contract",
+  })}`;
+  assert.throws(
+    () => validateFirstSharedTurnRows([]),
+    /Missing first-turn/u,
+  );
+  const local = parseChatTurnRows([{
+    relativePath: "window1/renderer.log",
+    text: row("local", 1, "local-first"),
+  }]);
+  assert.throws(
+    () => validateFirstSharedTurnRows(local),
+    /First safe allow turn did not execute/u,
+  );
+  const mixed = parseChatTurnRows([{
+    relativePath: "window1/renderer.log",
+    text: [
+      row("agent-host-copilotcli", 1, "shared-first"),
+      row("local", 2, "local-second"),
+    ].join("\n"),
+  }]);
+  assert.throws(
+    () => validateFirstSharedTurnRows(mixed),
+    /Local or mixed/u,
+  );
+  const shared = validateFirstSharedTurnRows(parseChatTurnRows([{
+    relativePath: "window1/renderer.log",
+    text: row("agent-host-copilotcli", 1, "shared-first"),
+  }]));
+  assert.equal(shared.firstTurn.sessionType, "agent-host-copilotcli");
+  assert.equal(shared.observedTurnCount, 1);
+
+  const suite = await readFile(new URL(
+    "../qa/vscode-native/extension/suite.cjs",
+    import.meta.url,
+  ), "utf8");
+  assert.match(
+    suite,
+    /for \(const \[index, input\] of turnInputs\.entries\(\)\) \{[\s\S]*?await runTurn\(modelSelector, input\.query, input\.tools\);[\s\S]*?if \(sessionRoute === SHARED_COPILOT_ROUTE && index === 0\) \{[\s\S]*?await waitForFirstSharedTurnEvidence\(\);[\s\S]*?\}\s+\}/u,
+    "First-turn route gate must run in the first iteration before the next query",
+  );
+  assert.doesNotMatch(
+    suite,
+    /if \(index === 0\) \{\s+receipt\.sessionRoute\.firstTurnEvidence/u,
+    "Legacy Local must never invoke the shared first-turn guard",
+  );
+});
+
+test("fresh-profile first-turn reader skips symlinked logs", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svqa-first-turn-"));
+  try {
+    const userData = path.join(temporary, "user-data");
+    const rendererDirectory = path.join(userData, "logs", "fresh", "window1");
+    const outside = path.join(temporary, "outside");
+    await mkdir(rendererDirectory, { recursive: true });
+    await mkdir(outside);
+    const makeRow = (sessionType: string) =>
+      `[ChatTTFP] end ${JSON.stringify({
+        interactionKind: "turn",
+        sessionType,
+        epochMs: sessionType === "agent-host-copilotcli" ? 1 : 0,
+        chatSessionId: sessionType,
+      })}\n`;
+    await writeFile(
+      path.join(rendererDirectory, "renderer.log"),
+      makeRow("agent-host-copilotcli"),
+    );
+    await writeFile(
+      path.join(outside, "renderer.log"),
+      makeRow("local"),
+    );
+    await symlink(
+      outside,
+      path.join(userData, "logs", "fresh", "escaped-logs"),
+    );
+    await symlink(
+      path.join(outside, "renderer.log"),
+      path.join(rendererDirectory, "linked.log"),
+    );
+    const rows = await readFreshProfileTurnRows(await realpath(userData));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.sessionType, "agent-host-copilotcli");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("qualification coverage never equates the four-case core with release qualification", async () => {
   const coverage = createQualificationCoverage();
   assert.deepEqual(coverage, {
@@ -433,9 +651,18 @@ test("qualification coverage never equates the four-case core with release quali
     import.meta.url,
   ), "utf8");
   assert.match(launcher, /resultScope: "source-preflight"/u);
-  assert.match(
-    launcher,
-    /if \(!policy\.allowLaunch\) \{\s+receipt\.result = "source-pass";\s+return receipt;\s+\}\s+receipt\.resultScope = "four-case-native-core";\s+receipt\.coverage\.nativeCore\.result = "fail";/u,
+  const preflightReturn = launcher.indexOf("if (!policy.allowLaunch)");
+  const nativeScope = launcher.indexOf(
+    "receipt.resultScope = policy.sessionRoute",
+  );
+  const nativeCoreStart = launcher.indexOf(
+    'receipt.coverage.nativeCore.result = "fail"',
+    nativeScope,
+  );
+  assert.ok(
+    preflightReturn > 0
+      && preflightReturn < nativeScope
+      && nativeScope < nativeCoreStart,
     "Preflight must return before native-core or shared-route validation",
   );
 
@@ -566,6 +793,123 @@ test("source preflight requires the transformed hook mapping and mutation", () =
     ].join(" "),
   });
   assert.equal(current.transformedHook, true);
+});
+
+test("shared source guard distinguishes telemetry from visible session routing", () => {
+  const workbench = [
+    "a?.targetChatSessionType?Mk(a.targetChatSessionType,i):void 0",
+    "byokModelIdentifier",
+    'function FDo(s,o,e,t){return o&&o!=="local"&&dXe(s,o)?s.filter(i=>i.metadata?.targetChatSessionType===o',
+    "s.filter(i=>!i.metadata?.targetChatSessionType",
+    "function Fvi(s,o,e){let t=s.get(fi),i=o.viewModel?.model.sessionResource,n=i?ui(i):void 0,r=EEt(s,{explicitOverride:e,currentSessionType:n})",
+    "n?.currentSessionType&&Vci(n.currentSessionType",
+    "function EEt(s,o)",
+    "return qDe(e,t,i,n,a,o,c",
+    'id:pf,title:F(13116,"New Chat")',
+  ].join(" ");
+  const agentHost = [
+    "this._wrapper.session.send({prompt:",
+    "_pendingClientToolCalls.respondOrBuffer",
+    'type:"chat/toolCallStart"',
+    "onUserPromptTransformed",
+    "toolResult:{...p.toolResult,...g.modifiedResult}",
+    "enum:[...Cx],enumDescriptions:[m(2794,null),m(2792,null),m(2793,null)]",
+    'default:Do.quality!=="stable"?"activeAgent":"utility",scope:1',
+    'o=>o==="activeAgent"',
+    'o=>o==="agentReview"',
+    "getAutomaticTitleGenerationStrategy",
+    "_unpersistedTitleStrategies",
+    'type:"openai",wireApi:"responses",baseUrl:s.providerBaseUrl(l)',
+    'r.listen(0,"127.0.0.1"',
+    "http://127.0.0.1:",
+    "this._bridgeRegistry.getServingConnection()",
+    '_writeJsonError(t,503,"No renderer connection available to service BYOK models"',
+    "let I=await y.chat(h)",
+    "resolveByokSessionConfig",
+    "_byokLmBridgeRegistry",
+    "_byokLmProxyService.start",
+  ].join(" ");
+  assert.deepEqual(
+    inspectSharedRouteSourceContracts({ workbench, agentHost }),
+    {
+      targetChatSessionTypeTelemetry: true,
+      wrappedModelSessionTypeFiltering: true,
+      visibleNewChatCurrentSessionForwarding: true,
+      visibleNewChatAction: true,
+      copilotSdkSend: true,
+      clientToolBridge: true,
+      hookConverters: true,
+      titleGenerationDeclaration: true,
+      titleGenerationNewSessionLogic: true,
+      byokProviderLoopbackConfiguration: true,
+      byokLocalhostBinding: true,
+      byokRendererRequired: true,
+      byokRegistryChatBridge: true,
+    },
+  );
+  assert.equal(
+    inspectSharedRouteSourceContracts({
+      workbench: workbench.replace(
+        "targetChatSessionType?Mk",
+        "targetChatSessionType?MUTATED",
+      ),
+      agentHost,
+    }).targetChatSessionTypeTelemetry,
+    false,
+  );
+  assert.equal(
+    inspectSharedRouteSourceContracts({
+      workbench: workbench.replace("function FDo", "function MUTATED"),
+      agentHost,
+    }).wrappedModelSessionTypeFiltering,
+    false,
+  );
+  assert.equal(
+    inspectSharedRouteSourceContracts({
+      workbench: workbench.replace(
+        "currentSessionType:n",
+        "currentSessionType:MUTATED",
+      ),
+      agentHost,
+    }).visibleNewChatCurrentSessionForwarding,
+    false,
+  );
+  assert.equal(
+    inspectSharedRouteSourceContracts({
+      workbench: workbench.replace("return qDe", "return MUTATED"),
+      agentHost,
+    }).visibleNewChatCurrentSessionForwarding,
+    false,
+  );
+  assert.equal(
+    inspectSharedRouteSourceContracts({
+      workbench: workbench.replace('"New Chat"', '"MUTATED"'),
+      agentHost,
+    }).visibleNewChatAction,
+    false,
+  );
+  for (const [needle, contract] of [
+    [
+      'type:"openai",wireApi:"responses",baseUrl:s.providerBaseUrl(l)',
+      "byokProviderLoopbackConfiguration",
+    ],
+    ['r.listen(0,"127.0.0.1"', "byokLocalhostBinding"],
+    [
+      "No renderer connection available to service BYOK models",
+      "byokRendererRequired",
+    ],
+    ["let I=await y.chat(h)", "byokRegistryChatBridge"],
+  ] as const) {
+    const mutated = inspectSharedRouteSourceContracts({
+      workbench,
+      agentHost: agentHost.replace(needle, "MUTATED"),
+    });
+    assert.equal(
+      mutated[contract],
+      false,
+      `${contract} must fail when its signed source prefix changes`,
+    );
+  }
 });
 
 test("native launch requires ephemeral in-memory secret storage", () => {
@@ -911,13 +1255,16 @@ test("launcher retains inventory and provider captures on native assertion failu
 test("portable QA defaults to preflight and rejects handoffs without the human gate", () => {
   assert.deepEqual(resolvePortableQaPolicy({}), {
     mode: "preflight",
+    sessionRoute: "legacy-local",
     allowLaunch: false,
     allowNormalTrustHandoff: false,
     allowUiEnableHandoff: false,
+    requireSharedModelHandoff: false,
     handoffs: {
       trust: undefined,
       disableAi: undefined,
       workspaceAi: undefined,
+      sharedModel: undefined,
     },
   });
   assert.throws(
@@ -928,6 +1275,43 @@ test("portable QA defaults to preflight and rejects handoffs without the human g
     () => resolvePortableQaPolicy({ SILMARIL_VSCODE_QA_ALLOW_HUMAN_UI: "true" }),
     /must be omitted or exactly 1/u,
   );
+  assert.throws(
+    () => resolvePortableQaPolicy({ SILMARIL_NATIVE_SESSION_ROUTE: "shared" }),
+    /must be omitted or exactly shared-copilot/u,
+  );
+});
+
+test("invalid route and handoff policy fail before fresh-root creation", async () => {
+  const parent = await makeShortRealQaParent("svqa-policy-");
+  try {
+    const root = path.join(parent, "must-not-exist");
+    const common = {
+      VSCODE_APP: "/private/nonexistent/Visual Studio Code.app",
+      VSCODE_NATIVE_PRIVATE_ROOT: root,
+      NATIVE_QUALIFICATION_RECEIPT: path.join(root, "receipt.json"),
+    };
+    await assert.rejects(
+      qualifyNativeVSCode({
+        ...common,
+        SILMARIL_NATIVE_SESSION_ROUTE: "invalid",
+      }),
+      /must be omitted or exactly shared-copilot/u,
+    );
+    await assert.rejects(
+      qualifyNativeVSCode({
+        ...common,
+        SILMARIL_VSCODE_QA_ALLOW_HUMAN_UI: "1",
+        SILMARIL_NATIVE_SESSION_ROUTE: "shared-copilot",
+      }),
+      /requires an absolute trust handoff/u,
+    );
+    await assert.rejects(
+      lstat(root),
+      (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+    );
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
 });
 
 test("portable human mode requires three distinct absolute handoffs", () => {
@@ -943,6 +1327,8 @@ test("portable human mode requires three distinct absolute handoffs", () => {
   assert.equal(policy.allowLaunch, true);
   assert.equal(policy.allowNormalTrustHandoff, true);
   assert.equal(policy.allowUiEnableHandoff, true);
+  assert.equal(policy.sessionRoute, "legacy-local");
+  assert.equal(policy.requireSharedModelHandoff, false);
   assert.throws(
     () => resolvePortableQaPolicy({
       ...env,
@@ -957,6 +1343,199 @@ test("portable human mode requires three distinct absolute handoffs", () => {
       NATIVE_TRUST_PENDING_PATH: "relative.json",
     }),
     /requires an absolute trust/u,
+  );
+});
+
+test("shared route requires a fourth contained UI handoff before launch", () => {
+  const root = "/private/qa";
+  const base = {
+    SILMARIL_VSCODE_QA_ALLOW_HUMAN_UI: "1",
+    SILMARIL_NATIVE_SESSION_ROUTE: "shared-copilot",
+    NATIVE_TRUST_PENDING_PATH: `${root}/trust.json`,
+    NATIVE_AGENT_ENABLE_PENDING_PATH: `${root}/disable.json`,
+    NATIVE_WORKSPACE_AI_ENABLE_PENDING_PATH: `${root}/workspace.json`,
+  };
+  assert.throws(
+    () => resolvePortableQaPolicy(base),
+    /requires an absolute sharedModel handoff/u,
+  );
+  const policy = resolvePortableQaPolicy({
+    ...base,
+    NATIVE_SHARED_MODEL_PENDING_PATH: `${root}/shared-model.json`,
+  });
+  assert.equal(policy.sessionRoute, "shared-copilot");
+  assert.equal(policy.requireSharedModelHandoff, true);
+  assert.equal(
+    policy.handoffs.sharedModel,
+    `${root}/shared-model.json`,
+  );
+  assert.throws(
+    () => resolvePortableQaPolicy({
+      ...base,
+      NATIVE_SHARED_MODEL_PENDING_PATH: base.NATIVE_TRUST_PENDING_PATH,
+    }),
+    /must be distinct/u,
+  );
+});
+
+test("shared route uses only exact observed wrapped metadata and attestation is not proof", async () => {
+  const constants = {
+    VENDOR: "silmaril-native-qa-dummy-8d724ae7",
+    MODEL_ID: "silmaril-native-qa-local-deterministic-8d724ae7",
+  };
+  const wrappedId = `${constants.VENDOR}/${constants.MODEL_ID}`;
+  assert.deepEqual(
+    modelSelectorForRoute(constants, "legacy-local"),
+    {
+      vendor: constants.VENDOR,
+      id: constants.MODEL_ID,
+    },
+    "Default driver must retain the unwrapped Local selector",
+  );
+  assert.deepEqual(
+    modelSelectorForRoute(constants, "shared-copilot"),
+    {
+      vendor: "agent-host-copilotcli",
+      id: wrappedId,
+    },
+  );
+  const publicModel = {
+    name: "Silmaril Native QA Local Deterministic Dummy",
+    vendor: "agent-host-copilotcli",
+    id: wrappedId,
+    family: wrappedId,
+    version: "1.0",
+    maxInputTokens: 32_768,
+  };
+  const modelReceipt = validateWrappedModels([publicModel], constants);
+  assert.equal(modelReceipt.vendor, "agent-host-copilotcli");
+  assert.equal(modelReceipt.id, wrappedId);
+  assert.equal(
+    Object.hasOwn(modelReceipt, "targetChatSessionType"),
+    false,
+    "Stable public metadata must not invent internal bridge fields",
+  );
+  assert.deepEqual(
+    modelSelectorFromPublicModel(modelReceipt),
+    {
+      vendor: publicModel.vendor,
+      id: publicModel.id,
+    },
+    "Turn selector must come from validated observed public metadata",
+  );
+  assert.throws(
+    () => validateWrappedModels([], constants),
+    /exactly one host-published wrapped/u,
+  );
+  assert.throws(
+    () => validateWrappedModels([{
+      ...publicModel,
+      vendor: constants.VENDOR,
+      id: constants.MODEL_ID,
+    }], constants),
+  );
+
+  const attestation = {
+    schemaVersion: 1,
+    state: "normal-visible-shared-model-selected",
+    kind: "human-ui-selection-action-only",
+    normalUiActions: {
+      sessionHarness: {
+        surface: "Chat session/harness picker",
+        syntheticCommandUsed: false,
+        observedTargetSessionType: "agent-host-copilotcli",
+        observationSource: "normal-visible-ui",
+      },
+      model: {
+        surface: "Chat model picker",
+        syntheticCommandUsed: false,
+      },
+    },
+    selectedPublicModel: {
+      vendor: publicModel.vendor,
+      id: publicModel.id,
+    },
+    executionProof: false,
+  };
+  assert.equal(
+    validateSelectionActionAttestation(attestation, publicModel)
+      .executionProof,
+    false,
+  );
+  assert.throws(
+    () => validateSelectionActionAttestation({
+      ...attestation,
+      executionProof: true,
+    }, publicModel),
+    /must never claim execution proof/u,
+  );
+  assert.throws(
+    () => validateSelectionActionAttestation({
+      ...attestation,
+      normalUiActions: {
+        ...attestation.normalUiActions,
+        sessionHarness: {
+          ...attestation.normalUiActions.sessionHarness,
+          observedTargetSessionType: "local",
+        },
+      },
+    }, publicModel),
+  );
+  assert.throws(
+    () => validateSelectionActionAttestation({
+      ...attestation,
+      normalUiActions: {
+        ...attestation.normalUiActions,
+        sessionHarness: {
+          ...attestation.normalUiActions.sessionHarness,
+          observationSource: "synthetic-api",
+        },
+      },
+    }, publicModel),
+    /must be observed in normal visible UI or the fresh-profile host log/u,
+  );
+  const suite = await readFile(new URL(
+    "../qa/vscode-native/extension/suite.cjs",
+    import.meta.url,
+  ), "utf8");
+  const handoff = suite.indexOf("await prepareSharedModelHandoff");
+  const observedSelector = suite.indexOf(
+    "modelSelector = modelSelectorFromPublicModel(publicModel)",
+    handoff,
+  );
+  const firstTurn = suite.indexOf(
+    "await runTurn(modelSelector, input.query, input.tools)",
+    observedSelector,
+  );
+  assert.ok(
+    handoff > 0 && handoff < observedSelector && observedSelector < firstTurn,
+    "Shared turn selector must be assigned from observed metadata after handoff",
+  );
+});
+
+test("activeAgent is written only to the fresh shared-route profile", () => {
+  const common = {
+    candidate: "/private/fresh/candidate",
+    proxyUrl: "http://127.0.0.1:12345",
+  };
+  const legacy = buildNativeProfileSettings({
+    ...common,
+    sessionRoute: "legacy-local",
+  });
+  assert.equal(
+    Object.hasOwn(
+      legacy,
+      "chat.agentHost.experimental.titleGeneration",
+    ),
+    false,
+  );
+  const shared = buildNativeProfileSettings({
+    ...common,
+    sessionRoute: "shared-copilot",
+  });
+  assert.equal(
+    shared["chat.agentHost.experimental.titleGeneration"],
+    "activeAgent",
   );
 });
 
@@ -1060,11 +1639,14 @@ test("fresh layout contains all human handoffs", async () => {
     const root = path.join(parent, "fresh");
     const base = {
       SILMARIL_VSCODE_QA_ALLOW_HUMAN_UI: "1",
+      SILMARIL_NATIVE_SESSION_ROUTE: "shared-copilot",
       NATIVE_TRUST_PENDING_PATH: path.join(root, "handoffs", "trust.json"),
       NATIVE_AGENT_ENABLE_PENDING_PATH:
         path.join(root, "handoffs", "disable.json"),
       NATIVE_WORKSPACE_AI_ENABLE_PENDING_PATH:
         path.join(root, "handoffs", "workspace.json"),
+      NATIVE_SHARED_MODEL_PENDING_PATH:
+        path.join(root, "handoffs", "shared-model.json"),
     };
     const policy = resolvePortableQaPolicy(base);
     await createFreshQaLayout({
@@ -1085,11 +1667,14 @@ test("fresh layout contains all human handoffs", async () => {
     const collisionReceipt = path.join(collisionRoot, "receipt.json");
     const collisionPolicy = resolvePortableQaPolicy({
       SILMARIL_VSCODE_QA_ALLOW_HUMAN_UI: "1",
+      SILMARIL_NATIVE_SESSION_ROUTE: "shared-copilot",
       NATIVE_TRUST_PENDING_PATH: collisionReceipt,
       NATIVE_AGENT_ENABLE_PENDING_PATH:
         path.join(collisionRoot, "disable.json"),
       NATIVE_WORKSPACE_AI_ENABLE_PENDING_PATH:
         path.join(collisionRoot, "workspace.json"),
+      NATIVE_SHARED_MODEL_PENDING_PATH:
+        path.join(collisionRoot, "shared-model.json"),
     });
     await assert.rejects(
       createFreshQaLayout({
@@ -1132,6 +1717,7 @@ test("two-phase UI deltas are exact and preserve every unrelated field", () => {
   const activeSettings = Buffer.from(JSON.stringify({
     "http.proxy": "http://127.0.0.1:2001",
     "chat.allowAnonymousAccess": true,
+    "chat.agentHost.experimental.titleGeneration": "activeAgent",
   }));
   const activeConfig = Buffer.from(JSON.stringify({
     apiUrl: "http://127.0.0.1:2002/classify",
@@ -1148,6 +1734,7 @@ test("two-phase UI deltas are exact and preserve every unrelated field", () => {
     observedSettingsBytes: Buffer.from(JSON.stringify({
       "http.proxy": "http://127.0.0.1:2001",
       "chat.allowAnonymousAccess": true,
+      "chat.agentHost.experimental.titleGeneration": "activeAgent",
       "chat.disableAIFeatures": true,
     })),
     observedConfigBytes: activeConfig,

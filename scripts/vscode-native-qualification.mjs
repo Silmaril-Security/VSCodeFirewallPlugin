@@ -118,6 +118,37 @@ const COPILOT_MANIFEST_SHA256 =
   "d0e92ec15928120112abbe0d45ce3b4a3c1051562421044848ee3dee014f0874";
 const COPILOT_SOURCE_SHA256 =
   "e8db5deec0a8fda393769d44c5f99ec29bd687f4e0e05f6b36e99e606f6efed0";
+const SHARED_ROUTE_SOURCE_SHA256 = Object.freeze({
+  product: "de4e360bfab7ab5f8cc79590998139da9b73ce5797213327da0ecf3e3e300b0c",
+  api: "1100202846278445e33f466d04d98378408da78cb9a4ec0c941ccecba75b769a",
+  workbench: "8bd0d70cda8542f514a45534a14860ea48ddf39f149036838aebfcf2cc6ba02a",
+  agentHost: "746ceacfdce1ac28d6fed9458e951b379f500a067185c7d92a7d30974c957fc6",
+  copilot: "e8db5deec0a8fda393769d44c5f99ec29bd687f4e0e05f6b36e99e606f6efed0",
+});
+const SHARED_ROUTE_SOURCE_OFFSETS = Object.freeze([
+  ["product", "c4453f8ea430795f941c1b2ff6c9321135a74a02", 71833],
+  ["api", "registerLanguageModelChatProvider", 740832],
+  ["workbench", "byokModelIdentifier", 4142664],
+  ["workbench", "function qDe(", 4124168],
+  ["workbench", "function EEt(", 4124983],
+  ["workbench", "function Fvi(", 6337692],
+  ["workbench", "targetChatSessionType?Mk", 9694557],
+  ["workbench", "function FDo(", 10064814],
+  ["workbench", "id:pf,title:F(13116", 13479537],
+  ["agentHost", "onUserPromptTransformed", 812501],
+  ["agentHost", "http://127.0.0.1:", 1669985],
+  ["agentHost", "No renderer connection available to service BYOK models", 1682898],
+  ["agentHost", "providerBaseUrl(", 1842046],
+  ["agentHost", "resolveByokSessionConfig", 1852831],
+  ["agentHost", "_byokLmProxyService.start", 1853109],
+  ["agentHost", "_pendingClientToolCalls.respondOrBuffer", 2097318],
+  ["agentHost", "this._wrapper.session.send({prompt:", 2139594],
+  ["agentHost", "default:Do.quality!==\"stable\"?\"activeAgent\":\"utility\"", 3666443],
+  ["copilot", "executePostToolUseHook", 12394122]
+]);
+const SHARED_TITLE_SETTING =
+  "chat.agentHost.experimental.titleGeneration";
+const SHARED_SESSION_TYPE = "agent-host-copilotcli";
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const REQUIRED_QA_TOOL_IDS = Object.freeze([
   "silmaril_native_qa_preblock_8d724ae7",
@@ -338,6 +369,73 @@ export function inspectSourceContracts({ api, copilot, workbench, agentHost }) {
       agentHost.includes('postToolUse:"PostToolUse"')
       && agentHost.includes("onPostToolUse")
       && agentHost.includes("modifiedResult"),
+  };
+}
+
+export function inspectSharedRouteSourceContracts({ workbench, agentHost }) {
+  return {
+    targetChatSessionTypeTelemetry:
+      workbench.includes(
+        "a?.targetChatSessionType?Mk(a.targetChatSessionType,i):void 0",
+      )
+      && workbench.includes("byokModelIdentifier"),
+    wrappedModelSessionTypeFiltering:
+      workbench.includes(
+        'function FDo(s,o,e,t){return o&&o!=="local"&&dXe(s,o)?s.filter(i=>i.metadata?.targetChatSessionType===o',
+      )
+      && workbench.includes(
+        "s.filter(i=>!i.metadata?.targetChatSessionType",
+      ),
+    visibleNewChatCurrentSessionForwarding:
+      workbench.includes(
+        "function Fvi(s,o,e){let t=s.get(fi),i=o.viewModel?.model.sessionResource,n=i?ui(i):void 0,r=EEt(s,{explicitOverride:e,currentSessionType:n})",
+      )
+      && workbench.includes(
+        "n?.currentSessionType&&Vci(n.currentSessionType",
+      )
+      && workbench.includes("function EEt(s,o)")
+      && workbench.includes("return qDe(e,t,i,n,a,o,c"),
+    visibleNewChatAction:
+      workbench.includes('id:pf,title:F(13116,"New Chat")'),
+    copilotSdkSend:
+      agentHost.includes("this._wrapper.session.send({prompt:"),
+    clientToolBridge:
+      agentHost.includes("_pendingClientToolCalls.respondOrBuffer")
+      && agentHost.includes('type:"chat/toolCallStart"'),
+    hookConverters:
+      agentHost.includes("onUserPromptTransformed")
+      && agentHost.includes(
+        "toolResult:{...p.toolResult,...g.modifiedResult}",
+      ),
+    titleGenerationDeclaration:
+      agentHost.includes(
+        'enum:[...Cx],enumDescriptions:[m(2794,null),m(2792,null),m(2793,null)]',
+      )
+      && agentHost.includes(
+        'default:Do.quality!=="stable"?"activeAgent":"utility",scope:1',
+      )
+      && agentHost.includes('o=>o==="activeAgent"')
+      && agentHost.includes('o=>o==="agentReview"'),
+    titleGenerationNewSessionLogic:
+      agentHost.includes("getAutomaticTitleGenerationStrategy")
+      && agentHost.includes("_unpersistedTitleStrategies"),
+    byokProviderLoopbackConfiguration:
+      agentHost.includes(
+        'type:"openai",wireApi:"responses",baseUrl:s.providerBaseUrl(l)',
+      ),
+    byokLocalhostBinding:
+      agentHost.includes('r.listen(0,"127.0.0.1"')
+      && agentHost.includes("http://127.0.0.1:"),
+    byokRendererRequired:
+      agentHost.includes("this._bridgeRegistry.getServingConnection()")
+      && agentHost.includes(
+        '_writeJsonError(t,503,"No renderer connection available to service BYOK models"',
+      ),
+    byokRegistryChatBridge:
+      agentHost.includes("let I=await y.chat(h)")
+      && agentHost.includes("resolveByokSessionConfig")
+      && agentHost.includes("_byokLmBridgeRegistry")
+      && agentHost.includes("_byokLmProxyService.start"),
   };
 }
 
@@ -695,6 +793,16 @@ async function sourceReceipt(app, identity) {
   );
   return {
     hashes,
+    sharedRouteReviewedOffsets: SHARED_ROUTE_SOURCE_OFFSETS.map(
+      ([name, needle, offset]) => ({
+        source: name,
+        needle,
+        offset,
+        exact: Buffer.from(encoded[name], "utf8").indexOf(
+          Buffer.from(needle, "utf8"),
+        ) === offset,
+      }),
+    ),
     product: {
       version: product.version,
       commit: product.commit,
@@ -708,6 +816,7 @@ async function sourceReceipt(app, identity) {
       engine: copilotManifest.engines.vscode,
     },
     contracts: inspectSourceContracts(encoded),
+    sharedRouteContracts: inspectSharedRouteSourceContracts(encoded),
     secretStorageIsolation: inspectSecretStorageIsolation(encoded),
     normalUiAgentEnablement: {
       contracts: inspectNormalUiAgentEnablement({
@@ -1582,16 +1691,128 @@ export function validateSharedCallbackRoutes(classifierRequests) {
   };
 }
 
+export function validateSharedExecutionRoute({
+  sessionRoute,
+  combinedLogs,
+  callbackProof,
+  capture,
+}) {
+  assert.equal(
+    sessionRoute,
+    "shared-copilot",
+    "Legacy Local configuration cannot satisfy the shared execution guard",
+  );
+  assert.equal(callbackProof?.result, "verified");
+  assert.equal(callbackProof?.runtime, "copilot");
+  assert.equal(
+    capture?.sessionRoute?.selectionAttestation?.executionProof,
+    false,
+    "Visible-selection attestation must remain action-only evidence",
+  );
+  assert.equal(
+    capture?.sessionRoute?.firstTurnEvidence?.source,
+    "fresh-profile-renderer-logs",
+    "Missing independently recorded first-turn renderer-log evidence",
+  );
+  assert.equal(
+    capture?.sessionRoute?.firstTurnEvidence?.firstTurn?.sessionType,
+    SHARED_SESSION_TYPE,
+    "First-turn checkpoint did not record the shared session type",
+  );
+  assert.deepEqual(capture?.sessionRoute?.modelSelector, {
+    vendor: SHARED_SESSION_TYPE,
+    id:
+      "silmaril-native-qa-dummy-8d724ae7/silmaril-native-qa-local-deterministic-8d724ae7",
+  });
+  assert.equal(
+    capture?.sessionRoute?.publicWrappedModel?.vendor,
+    SHARED_SESSION_TYPE,
+  );
+  assert.equal(
+    capture?.sessionRoute?.publicWrappedModel?.id,
+    capture.sessionRoute.modelSelector.id,
+  );
+  assert.ok(
+    Array.isArray(capture?.providerRequests)
+      && capture.providerRequests.length > 0,
+    "Shared execution did not reach the deterministic dummy provider",
+  );
+  for (const request of capture.providerRequests) {
+    assert.equal(
+      request?.model?.id,
+      "silmaril-native-qa-local-deterministic-8d724ae7",
+      "A provider request did not reach the registered deterministic dummy",
+    );
+  }
+
+  const turnRows = [];
+  const rowPattern = /\[ChatTTFP\] end (\{[^\n]+\})/gu;
+  for (const match of combinedLogs.matchAll(rowPattern)) {
+    try {
+      const row = JSON.parse(match[1]);
+      if (row.interactionKind === "turn") turnRows.push(row);
+    } catch {
+      // A malformed runtime row cannot become positive route evidence.
+    }
+  }
+  assert.ok(
+    turnRows.length >= 4,
+    "Missing first-turn and four-case ChatTTFP runtime metadata",
+  );
+  assert.equal(
+    turnRows[0].sessionType,
+    SHARED_SESSION_TYPE,
+    "First turn did not execute in agent-host-copilotcli",
+  );
+  assert.equal(
+    turnRows.every((row) => row.sessionType === SHARED_SESSION_TYPE),
+    true,
+    "Mixed or Local ChatTTFP session metadata observed",
+  );
+
+  const resourceSessionTypes = [
+    ...combinedLogs.matchAll(/vscode-chat-session:\/\/([^/\s]+)\//gu),
+  ].map((match) => match[1]);
+  assert.ok(
+    resourceSessionTypes.includes(SHARED_SESSION_TYPE),
+    "No shared session resource was observed",
+  );
+
+  return {
+    ...callbackProof,
+    execution: "verified",
+    sessionType: SHARED_SESSION_TYPE,
+    firstTurn: {
+      chatSessionId: turnRows[0].chatSessionId,
+      sessionType: turnRows[0].sessionType,
+      agent: turnRows[0].agent,
+      model: turnRows[0].model,
+    },
+    observedTurnCount: turnRows.length,
+    sharedSessionResourceObserved: true,
+    selectionAttestationIsExecutionProof: false,
+    firstTurnCheckpointObserved: true,
+  };
+}
+
 function validateNativeEvidence(
   capture,
   classifierRequests,
   preMarkerExists,
   coverage,
+  sessionRoute,
+  combinedLogs,
 ) {
   assert.equal(capture.result, "pass", capture.error?.message);
   assert.equal(capture.workspaceTrusted, true);
   assert.equal(preMarkerExists, false, "Pre-tool marker exists");
-  coverage.sharedRoute = validateSharedCallbackRoutes(classifierRequests);
+  const callbackProof = validateSharedCallbackRoutes(classifierRequests);
+  coverage.sharedRoute = validateSharedExecutionRoute({
+    sessionRoute,
+    combinedLogs,
+    callbackProof,
+    capture,
+  });
   const promptCases = [
     "SILMARIL_NATIVE_ALLOW_8d724ae7",
     "SILMARIL_NATIVE_BLOCK_8d724ae7",
@@ -1713,6 +1934,36 @@ async function listLogDirectoryNames(userData) {
     throw error;
   });
   return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+}
+
+async function readCurrentLaunchLogEvidence(userData, logDirectories) {
+  const logsRoot = path.join(userData, "logs");
+  const files = [];
+  const chunks = [];
+  const visit = async (directory) => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(absolute);
+      } else if (entry.isFile() && entry.name.endsWith(".log")) {
+        const bytes = await readFile(absolute);
+        chunks.push(bytes.toString("utf8"));
+        files.push({
+          relativePath: path.relative(logsRoot, absolute),
+          sha256: sha256Bytes(bytes),
+          byteLength: bytes.byteLength,
+        });
+      }
+    }
+  };
+  for (const name of logDirectories) {
+    await visit(path.join(logsRoot, name));
+  }
+  return {
+    files,
+    combinedLogs: chunks.join("\n"),
+  };
 }
 
 export async function inspectAndArchiveFreshUiFiles({
@@ -2051,6 +2302,33 @@ export function buildNativeLaunchArgs({
   ];
 }
 
+export function buildNativeProfileSettings({
+  candidate,
+  proxyUrl,
+  sessionRoute,
+}) {
+  const settings = {
+    "update.mode": "none",
+    "extensions.autoUpdate": "off",
+    "extensions.autoCheckUpdates": false,
+    "telemetry.telemetryLevel": "off",
+    "chat.allowAnonymousAccess": true,
+    "chat.plugins.enabled": true,
+    "chat.pluginLocations": {
+      [candidate]: true,
+    },
+    "http.proxy": proxyUrl,
+    "http.proxySupport": "override",
+    "workbench.startupEditor": "none",
+  };
+  if (sessionRoute === "shared-copilot") {
+    settings[SHARED_TITLE_SETTING] = "activeAgent";
+  } else {
+    assert.equal(sessionRoute, "legacy-local");
+  }
+  return settings;
+}
+
 export async function qualifyNativeVSCode(env = process.env) {
   const app = env.VSCODE_APP;
   const privateRoot = env.VSCODE_NATIVE_PRIVATE_ROOT;
@@ -2066,6 +2344,7 @@ export async function qualifyNativeVSCode(env = process.env) {
     trust: pendingTrustPath,
     disableAi: pendingAgentEnablePath,
     workspaceAi: pendingWorkspaceEnablePath,
+    sharedModel: pendingSharedModelPath,
   } = policy.handoffs;
   const evidence = layout.evidence;
   const capturePath = path.join(evidence, "provider-capture.json");
@@ -2228,6 +2507,70 @@ export async function qualifyNativeVSCode(env = process.env) {
       COPILOT_SOURCE_SHA256,
       "Signed built-in Copilot implementation changed from reviewed 1.145.2 source",
     );
+    if (policy.sessionRoute === "shared-copilot") {
+      for (const [name, expected] of Object.entries(
+        SHARED_ROUTE_SOURCE_SHA256,
+      )) {
+        assert.equal(
+          receipt.source.hashes[name],
+          expected,
+          `Signed ${name} source changed from the coordinator-supplied PE capture`,
+        );
+      }
+      const missingSharedContracts = Object.entries(
+        receipt.source.sharedRouteContracts,
+      ).filter(([, present]) => present !== true).map(([name]) => name);
+      assert.deepEqual(
+        missingSharedContracts,
+        [],
+        `Refusing shared-route QA; missing exact signed source contracts: ${missingSharedContracts.join(", ")}`,
+      );
+      assert.equal(
+        receipt.source.sharedRouteReviewedOffsets.every(
+          (entry) => entry.exact === true,
+        ),
+        true,
+        "Signed shared-route source prefix moved from the coordinator-supplied PE byte offsets",
+      );
+      receipt.source.sharedRouteExperiment = {
+        result: "source-admitted-runtime-unverified",
+        sessionType: SHARED_SESSION_TYPE,
+        titleGeneration: {
+          key: SHARED_TITLE_SETTING,
+          configuredValue: "activeAgent",
+          stableDefault: "utility",
+          scope: "application",
+          appliesTo: "new shared sessions only",
+        },
+        sourceHashes: Object.fromEntries(
+          Object.keys(SHARED_ROUTE_SOURCE_SHA256).map((name) => [
+            name,
+            receipt.source.hashes[name],
+          ]),
+        ),
+        reviewedOffsets: receipt.source.sharedRouteReviewedOffsets,
+        sessionSelectionSource: {
+          targetChatSessionTypeHandling: "telemetry-only",
+          wrappedModelVisibility:
+            "filtered from Local picker; visible only for an existing matching non-Local session",
+          visibleNewChat:
+            "forwards the current session type through EEt/qDe",
+          runtimeQualification:
+            "requires first-safe-turn and final callback/log proof",
+        },
+        byokRegisteredProviderPath: {
+          result: "source-admitted-runtime-unverified",
+          providerType: "openai",
+          wireApi: "responses",
+          transport: "host-owned-127.0.0.1-loopback",
+          rendererBridgeRequired: true,
+          scope:
+            "Intended deterministic registered-provider route only; not execution evidence.",
+        },
+        networkBoundary:
+          "The application proxy records and allowlists observed proxy traffic; it is not OS-level network isolation.",
+      };
+    }
 
     const {
       home,
@@ -2260,7 +2603,9 @@ export async function qualifyNativeVSCode(env = process.env) {
       receipt.result = "source-pass";
       return receipt;
     }
-    receipt.resultScope = "four-case-native-core";
+    receipt.resultScope = policy.sessionRoute === "shared-copilot"
+      ? "shared-copilot-four-case-native-core"
+      : "four-case-native-core";
     receipt.coverage.nativeCore.result = "fail";
 
     classifier = startClassifier();
@@ -2286,20 +2631,11 @@ export async function qualifyNativeVSCode(env = process.env) {
     const settingsPath = path.join(settingsDirectory, "settings.json");
     const configPath = path.join(home, ".vscode", "silmaril-firewall.json");
     await mkdir(settingsDirectory, { recursive: true, mode: 0o700 });
-    await writeJson(settingsPath, {
-      "update.mode": "none",
-      "extensions.autoUpdate": "off",
-      "extensions.autoCheckUpdates": false,
-      "telemetry.telemetryLevel": "off",
-      "chat.allowAnonymousAccess": true,
-      "chat.plugins.enabled": true,
-      "chat.pluginLocations": {
-        [candidate]: true,
-      },
-      "http.proxy": proxyUrl,
-      "http.proxySupport": "override",
-      "workbench.startupEditor": "none",
-    });
+    await writeJson(settingsPath, buildNativeProfileSettings({
+      candidate,
+      proxyUrl,
+      sessionRoute: policy.sessionRoute,
+    }));
     const nodePath = await realpath(process.execPath);
     const nodeInfo = await stat(nodePath);
     assert.ok(nodeInfo.isFile());
@@ -2386,6 +2722,10 @@ export async function qualifyNativeVSCode(env = process.env) {
       evidence,
       "normal-ui-workspace-ai-enable-ready.json",
     );
+    const sharedModelReadyPath = path.join(
+      evidence,
+      "normal-ui-shared-model-ready.json",
+    );
     const profileResolvedPath = layout.root;
     const workspaceResolvedPath = await realpath(workspace);
     const existingLogDirectories = await listLogDirectoryNames(userData);
@@ -2434,6 +2774,14 @@ export async function qualifyNativeVSCode(env = process.env) {
       SILMARIL_NATIVE_AI_DISABLE_READY_PATH: aiDisableReadyPath,
       SILMARIL_NATIVE_AI_WORKSPACE_ENABLE_READY_PATH:
         workspaceAiEnableReadyPath,
+      ...(policy.sessionRoute === "shared-copilot"
+        ? {
+            SILMARIL_NATIVE_SHARED_MODEL_READY_PATH: sharedModelReadyPath,
+            SILMARIL_NATIVE_SHARED_MODEL_PENDING_PATH:
+              pendingSharedModelPath,
+            SILMARIL_NATIVE_SESSION_ROUTE: policy.sessionRoute,
+          }
+        : {}),
       SILMARIL_NATIVE_PROFILE_SETTINGS_PATH: settingsPath,
       SILMARIL_NATIVE_WORKSPACE_FILE_PATH: workspaceFile,
       SILMARIL_NATIVE_USER_DATA: userData,
@@ -2568,6 +2916,51 @@ export async function qualifyNativeVSCode(env = process.env) {
         },
       });
     }
+    if (pendingSharedModelPath) {
+      handoffs.push({
+        readyPath: sharedModelReadyPath,
+        pendingPath: pendingSharedModelPath,
+        pendingState:
+          "waiting-for-normal-visible-shared-session-and-model-selection",
+        readyTimeoutMs: WORKSPACE_AI_ENABLE_READY_TIMEOUT_MS,
+        readinessDescription:
+          "the normal visible shared session/harness and wrapped-model picker handoff",
+        pendingContext: {
+          appPath: resolvedApp,
+          appVersion: identity.version,
+          appCommit: identity.commit,
+          profileResolvedPath,
+          workspaceResolvedPath,
+          workspaceFile: await realpath(workspaceFile),
+          windowTitle,
+          receiptPath,
+          sourceProof: receipt.source.sharedRouteExperiment,
+          normalUiInstruction: {
+            actionsInOrder: [
+              {
+                surface: "Chat session/harness picker",
+                action:
+                  "Select the advertised shared Copilot session/harness and observe target session type agent-host-copilotcli in the normal visible UI or fresh-profile host log.",
+              },
+              {
+                surface: "Chat model picker",
+                action:
+                  "Select the host-published Silmaril Native QA Local Deterministic Dummy entry whose ready.publicModel has vendor agent-host-copilotcli and the exact observed id.",
+              },
+            ],
+            forbiddenActions: [
+              "synthetic command selection",
+              "sign-in",
+              "account setup",
+              "provider setup",
+              "real inference",
+            ],
+            completion:
+              "If either entry is absent or requires authentication/provider setup, stop unverified. After both visible selections, replace this contained marker with the documented human-ui-selection-action-only attestation. These attest only the UI actions; model selection does not create the route and runtime proof remains mandatory.",
+          },
+        },
+      });
+    }
     nativeLaunchAttempted = true;
     receipt.process = await launchApp({
       executable,
@@ -2606,6 +2999,11 @@ export async function qualifyNativeVSCode(env = process.env) {
       receipt.profile.currentLaunchLogDirectories.length > 0,
       "No fresh VS Code log directory was created for this invocation",
     );
+    const runtimeLogs = await readCurrentLaunchLogEvidence(
+      userData,
+      receipt.profile.currentLaunchLogDirectories,
+    );
+    receipt.profile.currentLaunchLogs = runtimeLogs.files;
     assert.equal(
       await pathExists(isolationReceiptPath),
       true,
@@ -2642,6 +3040,8 @@ export async function qualifyNativeVSCode(env = process.env) {
       classifier.requests,
       preMarkerExists,
       receipt.coverage,
+      policy.sessionRoute,
+      runtimeLogs.combinedLogs,
     );
     receipt.evidence = await listEvidence(evidence);
 
