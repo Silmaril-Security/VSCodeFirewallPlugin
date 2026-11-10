@@ -12,6 +12,15 @@ const {
 } = require("./agent-ui-policy.cjs");
 const { snapshotNativeState } = require("./capture-state.cjs");
 const { buildSafeExtensionInventory } = require("./inventory.cjs");
+const {
+  SHARED_COPILOT_ROUTE,
+  modelSelectorForRoute,
+  modelSelectorFromPublicModel,
+  readFreshProfileTurnRows,
+  validateFirstSharedTurnRows,
+  validateSelectionActionAttestation,
+  validateWrappedModels,
+} = require("./shared-route-policy.cjs");
 const { workspaceTrustAction } = require("./trust-policy.cjs");
 
 const ALLOW_QUERY =
@@ -567,18 +576,118 @@ async function waitForModels(vendor, id) {
   throw new Error(`Timed out waiting for unique dummy model ${vendor}/${id}`);
 }
 
-async function runTurn(constants, query, toolsInclude) {
+function titleGenerationCapture() {
+  const configuration = vscode.workspace.getConfiguration(
+    "chat.agentHost.experimental",
+  );
+  const inspected = configuration.inspect("titleGeneration");
+  assert.ok(
+    inspected,
+    "Shared route requires the declared titleGeneration setting",
+  );
+  return {
+    source: "vscode.workspace.getConfiguration().inspect()",
+    key: "chat.agentHost.experimental.titleGeneration",
+    effectiveValue: configuration.get("titleGeneration"),
+    defaultValue: inspected.defaultValue,
+    globalValue: inspected.globalValue,
+    workspaceValue: inspected.workspaceValue,
+    workspaceFolderValue: inspected.workspaceFolderValue,
+  };
+}
+
+async function waitForSelectionActionAttestation(
+  pendingPath,
+  expectedModel,
+  timeoutMs,
+) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    try {
+      const value = JSON.parse(await fs.readFile(pendingPath, "utf8"));
+      if (value.state === "normal-visible-shared-model-selected") {
+        return validateSelectionActionAttestation(value, expectedModel);
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  throw new Error(
+    "Timed out waiting for the coordinator's normal visible shared-session and wrapped-model selection attestation",
+  );
+}
+
+async function prepareSharedModelHandoff(constants, publicModel) {
+  const readyPath = process.env.SILMARIL_NATIVE_SHARED_MODEL_READY_PATH;
+  const pendingPath = process.env.SILMARIL_NATIVE_SHARED_MODEL_PENDING_PATH;
+  assert.ok(readyPath && path.isAbsolute(readyPath));
+  assert.ok(pendingPath && path.isAbsolute(pendingPath));
+  assert.notEqual(readyPath, pendingPath);
+  await writeImmutableCapture(readyPath, {
+    schemaVersion: 1,
+    state: "normal-visible-shared-model-selection-required",
+    readyAt: new Date().toISOString(),
+    publicModel,
+    sourceVerifiedBridge: {
+      expectedTargetChatSessionType: "agent-host-copilotcli",
+      expectedByokModelIdentifier:
+        `${constants.VENDOR}/${constants.MODEL_ID}`,
+      metadataSource: "signed-host-source-guard",
+      stableApiExposesTheseFields: false,
+    },
+    normalUiActionsInOrder: {
+      sessionHarness: {
+        surface: "Chat session/harness picker",
+        action: "select the advertised shared Copilot session/harness",
+        expectedTargetSessionType: "agent-host-copilotcli",
+        syntheticCommandPermitted: false,
+        accountOrProviderSetupPermitted: false,
+      },
+      model: {
+        surface: "Chat model picker",
+        action: "select the host-published wrapped deterministic dummy",
+        syntheticCommandPermitted: false,
+        accountOrProviderSetupPermitted: false,
+      },
+    },
+    stopUnverifiedIfEitherEntryIsAbsentOrRequiresAuthentication: true,
+    modelSelectionDoesNotCreateTheSessionRoute: true,
+    qualification: "pending-runtime-route-proof",
+  });
+  return await waitForSelectionActionAttestation(
+    pendingPath,
+    publicModel,
+    300_000,
+  );
+}
+
+async function runTurn(modelSelector, query, toolsInclude) {
   await vscode.commands.executeCommand("workbench.action.chat.newChat");
   return await vscode.commands.executeCommand("workbench.action.chat.open", {
     mode: "agent",
     query,
-    modelSelector: {
-      vendor: constants.VENDOR,
-      id: constants.MODEL_ID,
-    },
+    modelSelector,
     toolsInclude,
     blockOnResponse: true,
   });
+}
+
+async function waitForFirstSharedTurnEvidence(timeoutMs = 5_000) {
+  const userData = process.env.SILMARIL_NATIVE_USER_DATA;
+  assert.ok(
+    userData && path.isAbsolute(userData),
+    "Missing fresh-profile user-data path for first-turn route proof",
+  );
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const rows = await readFreshProfileTurnRows(userData);
+    if (rows.length > 0) return validateFirstSharedTurnRows(rows);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  return validateFirstSharedTurnRows([]);
 }
 
 async function run() {
@@ -689,12 +798,43 @@ async function run() {
     const { constants, state, collectStrings } = api;
     nativeState = state;
     const selected = await waitForModels(constants.VENDOR, constants.MODEL_ID);
+    const sessionRoute =
+      process.env.SILMARIL_NATIVE_SESSION_ROUTE ?? "legacy-local";
+    const expectedModelSelector =
+      modelSelectorForRoute(constants, sessionRoute);
+    let modelSelector = expectedModelSelector;
     receipt.model = {
       vendor: selected.vendor,
       id: selected.id,
       family: selected.family,
       version: selected.version,
     };
+    receipt.sessionRoute = {
+      configured: sessionRoute,
+      modelSelector,
+      status: sessionRoute === SHARED_COPILOT_ROUTE
+        ? "pending-runtime-proof"
+        : "legacy-local",
+    };
+    if (sessionRoute === SHARED_COPILOT_ROUTE) {
+      const titleGeneration = titleGenerationCapture();
+      assert.equal(titleGeneration.defaultValue, "utility");
+      assert.equal(titleGeneration.globalValue, "activeAgent");
+      assert.equal(titleGeneration.effectiveValue, "activeAgent");
+      assert.equal(titleGeneration.workspaceValue, undefined);
+      assert.equal(titleGeneration.workspaceFolderValue, undefined);
+      receipt.sessionRoute.titleGeneration = titleGeneration;
+      const wrapped = [await waitForModels(
+        expectedModelSelector.vendor,
+        expectedModelSelector.id,
+      )];
+      const publicModel = validateWrappedModels(wrapped, constants);
+      receipt.sessionRoute.publicWrappedModel = publicModel;
+      receipt.sessionRoute.selectionAttestation =
+        await prepareSharedModelHandoff(constants, publicModel);
+      modelSelector = modelSelectorFromPublicModel(publicModel);
+      receipt.sessionRoute.modelSelector = modelSelector;
+    }
 
     const turnInputs = [
       {
@@ -718,9 +858,9 @@ async function run() {
         tools: [constants.POST_TOOL],
       },
     ];
-    for (const input of turnInputs) {
+    for (const [index, input] of turnInputs.entries()) {
       const requestStart = state.providerRequests.length;
-      const result = await runTurn(constants, input.query, input.tools);
+      const result = await runTurn(modelSelector, input.query, input.tools);
       receipt.turns.push({
         name: input.name,
         query: input.query,
@@ -728,6 +868,10 @@ async function run() {
         providerRequestStart: requestStart,
         providerRequestEnd: state.providerRequests.length,
       });
+      if (sessionRoute === SHARED_COPILOT_ROUTE && index === 0) {
+        receipt.sessionRoute.firstTurnEvidence =
+          await waitForFirstSharedTurnEvidence();
+      }
     }
 
     const preMarkerPath = process.env.SILMARIL_NATIVE_PRE_MARKER_PATH;

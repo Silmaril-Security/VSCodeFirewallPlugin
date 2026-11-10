@@ -140,9 +140,10 @@ bytes. It writes `source-pass` for admitted source target 1.145.2 without
 spawning a GUI. `source-pass` is not a native or supported-floor result and
 cannot mark the shared route verified.
 
-Only a separately reviewed human run may set the explicit gate below. It
-requires three distinct absolute marker paths inside the same fresh root and
-contains exactly one application launch with no automatic retry:
+Only a separately reviewed human run may set the explicit gate below. The
+legacy Local experiment requires three distinct absolute marker paths inside
+the same fresh root and contains exactly one application launch with no
+automatic retry:
 
 ```sh
 QA_PARENT="$(mktemp -d /private/tmp/svqa.XXXXXX)"
@@ -163,15 +164,122 @@ The coordinator performs only these normal UI actions, in marker order:
 
 1. After the isolation receipt passes and the trust marker appears, accept
    normal workspace trust for the displayed synthetic workspace.
-2. After the phase-1 marker appears, use the bundled Copilot extension's
-   normal Extensions menu and select **Disable AI Features**.
+2. After the phase-1 marker appears, use this source-verified normal host UI
+   path: Extensions view → View menu → Command Palette →
+   **Extensions: Show Built-in Extensions**. Append plain `copilot` to the
+   existing built-in filter, open the bundled **GitHub Copilot** gear, and
+   select **Disable AI Features**. This avoids unreliable modifier/`@` key
+   transmission through Screen Sharing.
 3. After the phase-2 marker appears, select
    **Enable AI Features (Workspace)**.
 
 Do not install an extension, sign in, accept terms, start chat setup, select a
-real provider, execute a disabled command, or interact with another window.
-If any normal UI action is unavailable or requests an account, entitlement,
-credential, or real provider, stop and retain the failure receipt.
+real provider, synthesize a host command, edit settings to bypass the normal
+UI, execute a disabled command, or interact with another window. If either
+phase action cannot complete, is unavailable, or requests an account,
+entitlement, credential, or real provider, stop unverified and retain the
+receipts. Do not lengthen a deadline or retry automatically.
+
+### Experimental shared Copilot route
+
+The shared route is a separate, explicit QA experiment. It is not the default,
+does not record a native pass, does not establish a supported floor, and does
+not change the incomplete release/Warn/Shadow/batch-resume status. Add both
+the route opt-in and a fourth contained handoff:
+
+Current status: native004 and native005 both failed setup before any model
+turn. In each attempt, the 225-second normal **Disable AI Features**
+configuration observer expired. Neither attempt reached the fourth handoff,
+sent a turn, called the dummy provider, or produced callback proof. In-memory
+secret storage and workspace trust passed; owned process groups terminated,
+servers closed, and all three private configurations were restored. These
+setup-only results are neither evidence for nor against the shared route,
+do not supersede the immutable native003 Local security failures, and do not
+claim a source fix, fresh shared qualification, or supported floor.
+
+```sh
+export SILMARIL_NATIVE_SESSION_ROUTE=shared-copilot
+export NATIVE_SHARED_MODEL_PENDING_PATH="$QA_ROOT/handoffs/shared-model.json"
+# Then run the reviewed human command above with these two exports present.
+```
+
+The fresh private application settings include
+`chat.agentHost.experimental.titleGeneration=activeAgent` only for this
+opt-in. The exact signed source guard requires its stable default `utility`,
+application scope, and new-session strategy before launch. This mitigates only
+new shared-session title generation; it does not fix Local title handling,
+qualify defaults, or establish universal confidentiality.
+
+After trust, **Disable AI Features**, and
+**Enable AI Features (Workspace)** complete, wait for the fourth marker. In
+the normal Chat UI, first use the visible Chat session/harness picker to
+select the advertised shared Copilot session. Then open the visible model
+picker and select the displayed **Silmaril Native QA Local Deterministic
+Dummy** entry matching
+`ready.publicModel.vendor=agent-host-copilotcli` and the exact
+`ready.publicModel.id`. Do not use a command to select either entry. If the
+shared session/harness or exact wrapped model is absent, or either asks for
+authentication/provider setup, stop unverified. After both visible actions,
+replace the fourth contained marker with:
+
+```json
+{
+  "schemaVersion": 1,
+  "state": "normal-visible-shared-model-selected",
+  "kind": "human-ui-selection-action-only",
+  "normalUiActions": {
+    "sessionHarness": {
+      "surface": "Chat session/harness picker",
+      "syntheticCommandUsed": false,
+      "observedTargetSessionType": "agent-host-copilotcli",
+      "observationSource": "normal-visible-ui"
+    },
+    "model": {
+      "surface": "Chat model picker",
+      "syntheticCommandUsed": false
+    }
+  },
+  "selectedPublicModel": {
+    "vendor": "agent-host-copilotcli",
+    "id": "<copy ready.publicModel.id exactly>"
+  },
+  "executionProof": false
+}
+```
+
+Use `fresh-profile-host-log` instead of `normal-visible-ui` only when that is
+the actual observation source. This marker attests only the two visible
+selection actions. It cannot satisfy route qualification. The source guard
+identifies `targetChatSessionType` handling as telemetry, not route creation:
+the wrapped model is filtered from the Local picker and becomes selectable
+only for an already selected matching non-Local session. The visible New Chat
+path forwards the current session type. The expected wrapper identity is used
+only to query and validate one public wrapped model; after the handoff, the
+turn selector is copied from that observed model's exact public `vendor` and
+`id`. Model selection alone does not create or prove the shared route.
+
+The first query is the safe allow case. Before any blocked-prompt or synthetic
+tool fixture is sent, the suite polls only regular `.log` files under the
+fresh profile's own user-data log tree, without following symlinks. The first
+actual `[ChatTTFP] end` turn row must be `agent-host-copilotcli`, and no Local
+or mixed turn row may be present. Missing or wrong first-turn metadata stops
+the suite immediately.
+
+A result remains failed unless final fresh runtime logs prove every actual
+turn is `agent-host-copilotcli` and at least one shared session resource is
+present, the registered dummy receives every provider request, and the
+existing strict callback tuple proves `copilot/userPromptTransformed`,
+`copilot/preToolUse`, and `copilot/postToolUse`. An unused empty Local resource
+created at startup is not an executed Local turn and does not fail this gate.
+Any actual Local or mixed turn/callback, missing wrapper, account/provider
+requirement, or absent runtime proof fails closed without fallback.
+
+The signed-source admission also pins the host-owned BYOK registered-provider
+path: OpenAI-compatible `responses` wire format, a `127.0.0.1` loopback base
+URL, renderer bridge requirement with a 503 when unavailable, and registry
+chat forwarding. This is source evidence for the intended deterministic
+dummy route, not execution evidence. The application proxy records and
+allowlists observed proxy traffic; it is not OS-level network isolation.
 
 The source-verified two-phase transition writes only
 `chat.disableAIFeatures=true` in private synthetic profile settings, followed

@@ -1,5 +1,9 @@
 export const SAFE_BLOCK_MESSAGE: string;
 
+export function qualifyNativeVSCode(
+  env?: Record<string, string | undefined>,
+): Promise<Record<string, any>>;
+
 export function byteReceipt(value: string): {
   byteLength: number;
   sha256: string;
@@ -51,6 +55,8 @@ export function createQualificationCoverage(): {
   sharedRoute: {
     result: "unverified" | "verified";
     runtime?: "copilot";
+    execution?: "verified";
+    sessionType?: "agent-host-copilotcli";
     callbacks?: {
       userPromptTransformed: 4;
       preToolUse: 1;
@@ -81,6 +87,28 @@ export function validateSharedCallbackRoutes(
   };
 };
 
+export function validateSharedExecutionRoute(options: {
+  sessionRoute: "legacy-local" | "shared-copilot";
+  combinedLogs: string;
+  callbackProof: ReturnType<typeof validateSharedCallbackRoutes>;
+  capture: Record<string, any>;
+}): {
+  result: "verified";
+  runtime: "copilot";
+  execution: "verified";
+  sessionType: "agent-host-copilotcli";
+  callbacks: {
+    userPromptTransformed: 4;
+    preToolUse: 1;
+    postToolUse: 1;
+  };
+  firstTurn: Record<string, unknown>;
+  observedTurnCount: number;
+  sharedSessionResourceObserved: true;
+  selectionAttestationIsExecutionProof: false;
+  firstTurnCheckpointObserved: true;
+};
+
 export function validateQaToolManifest(manifest: Record<string, any>): {
   result: "pass";
   tools: Array<{
@@ -99,13 +127,16 @@ export function pathIsWithin(root: string, candidate: string): boolean;
 
 export function resolvePortableQaPolicy(env?: Record<string, string | undefined>): {
   mode: "preflight" | "human-ui";
+  sessionRoute: "legacy-local" | "shared-copilot";
   allowLaunch: boolean;
   allowNormalTrustHandoff: boolean;
   allowUiEnableHandoff: boolean;
+  requireSharedModelHandoff: boolean;
   handoffs: {
     trust?: string;
     disableAi?: string;
     workspaceAi?: string;
+    sharedModel?: string;
   };
 };
 
@@ -198,6 +229,12 @@ export function buildNativeLaunchArgs(options: {
   proxyUrl: string;
 }): string[];
 
+export function buildNativeProfileSettings(options: {
+  candidate: string;
+  proxyUrl: string;
+  sessionRoute: "legacy-local" | "shared-copilot";
+}): Record<string, unknown>;
+
 export function closeServer(
   server: {
     close(callback: (error?: Error) => void): void;
@@ -278,6 +315,25 @@ export function inspectSourceContracts(sources: {
   transformedHook: boolean;
   preToolHook: boolean;
   postToolHook: boolean;
+};
+
+export function inspectSharedRouteSourceContracts(sources: {
+  workbench: string;
+  agentHost: string;
+}): {
+  targetChatSessionTypeTelemetry: boolean;
+  wrappedModelSessionTypeFiltering: boolean;
+  visibleNewChatCurrentSessionForwarding: boolean;
+  visibleNewChatAction: boolean;
+  copilotSdkSend: boolean;
+  clientToolBridge: boolean;
+  hookConverters: boolean;
+  titleGenerationDeclaration: boolean;
+  titleGenerationNewSessionLogic: boolean;
+  byokProviderLoopbackConfiguration: boolean;
+  byokLocalhostBinding: boolean;
+  byokRendererRequired: boolean;
+  byokRegistryChatBridge: boolean;
 };
 
 export function inspectNormalUiAgentEnablement(sources: {

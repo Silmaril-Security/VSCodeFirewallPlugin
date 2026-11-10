@@ -4,13 +4,16 @@ export function resolvePortableQaPolicy(
   env?: NodeJS.ProcessEnv,
 ): {
   mode: "preflight" | "human-ui";
+  sessionRoute: "legacy-local" | "shared-copilot";
   allowLaunch: boolean;
   allowNormalTrustHandoff: boolean;
   allowUiEnableHandoff: boolean;
+  requireSharedModelHandoff: boolean;
   handoffs: {
     trust?: string;
     disableAi?: string;
     workspaceAi?: string;
+    sharedModel?: string;
   };
 };
 
