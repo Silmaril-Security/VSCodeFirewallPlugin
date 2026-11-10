@@ -180,6 +180,31 @@ phase action cannot complete, is unavailable, or requests an account,
 entitlement, credential, or real provider, stop unverified and retain the
 receipts. Do not lengthen a deadline or retry automatically.
 
+Each handoff records four distinct real paths: the private `userData/User`
+profile directory, its exact `settings.json`, the private user-data directory,
+and the owned workspace file. The normal-UI observer polls those exact files
+at 100 ms and treats ordinary configuration and extension events only as
+wakeups. Phase 1 succeeds only when the exact profile delta and public
+effective/global `true` scope agree with no workspace value. Phase 2 also
+requires the retained profile `true`, exact workspace `false`, matching public
+effective/global/workspace scope, and normal registration of the exact signed
+built-in extension. The registry is re-read on every phase-2 observation;
+stable object identity may reuse its signed hash proof, but removal or
+replacement clears or re-verifies it. Final phase success freshly verifies
+two independently read current wrappers and compares their immutable signed
+identity (`id`, version, built-in status, canonical full path, manifest hash,
+and source hash) with the accepted proof. Equivalent fresh API wrappers pass;
+an absent or identity-changed extension fails. File-only or public-event-only
+evidence fails closed.
+
+Every observation read is bounded by the unchanged active stage deadline. A
+result completing at or after that deadline cannot satisfy the stage. Read or
+JSON-classification failures produce only a safe category/code, phase and
+stage timing, event/poll counts, private paths, and hashes for bytes actually
+available; raw file contents and underlying error messages are never copied
+to diagnostics. Timed-out reads are ignored if they settle later, and all
+ordinary-event subscriptions are disposed on failure.
+
 ### Experimental shared Copilot route
 
 The shared route is a separate, explicit QA experiment. It is not the default,
@@ -188,14 +213,22 @@ not change the incomplete release/Warn/Shadow/batch-resume status. Add both
 the route opt-in and a fourth contained handoff:
 
 Current status: native004 and native005 both failed setup before any model
-turn. In each attempt, the 225-second normal **Disable AI Features**
-configuration observer expired. Neither attempt reached the fourth handoff,
-sent a turn, called the dummy provider, or produced callback proof. In-memory
-secret storage and workspace trust passed; owned process groups terminated,
-servers closed, and all three private configurations were restored. These
-setup-only results are neither evidence for nor against the shared route,
-do not supersede the immutable native003 Local security failures, and do not
-claim a source fix, fresh shared qualification, or supported floor.
+turn. Native004 did not reach the bundled Copilot menu before the handoff
+deadline; native005 recorded a **Disable AI Features** observer expiry. The
+sanitized records do not establish whether native005's 180-second extension
+observer or the cumulative 225-second launcher handoff bound fired, whether
+the action occurred in the intended private profile, or whether an ordinary
+event was missed. The 225/420-second launcher bounds remain cumulative from
+owned process spawn and intentionally include trust and earlier phases; the
+600-second process bound is unchanged. New diagnostics record each label,
+start, deadline, and time origin without claiming one as the prior cause.
+Neither attempt reached the fourth handoff, sent a turn, called the dummy
+provider, or produced callback proof. In-memory secret storage and workspace
+trust passed; owned process groups terminated, servers closed, and all three
+private configurations were restored. These setup-only results are neither
+evidence for nor against the shared route, do not supersede the immutable
+native003 Local security failures, and do not claim a source fix, fresh
+shared qualification, or supported floor.
 
 ```sh
 export SILMARIL_NATIVE_SESSION_ROUTE=shared-copilot
@@ -284,9 +317,16 @@ allowlists observed proxy traffic; it is not OS-level network isolation.
 The source-verified two-phase transition writes only
 `chat.disableAIFeatures=true` in private synthetic profile settings, followed
 by `settings.chat.disableAIFeatures=false` in the synthetic workspace file.
-The harness observes public configuration and extension events and then
-requires ordinary registration of exact built-in `github.copilot-chat`
-0.73.0 at the signed application path with the hashes above.
+The bounded observer periodically reads exact private files and public
+configuration state; public configuration and extension events are wakeups,
+not the sole completion source. Timeout evidence contains only known QA
+booleans, event counts, exact private paths, timestamps, hashes, and delta
+classifications. It distinguishes no approved action, a public/file
+source-of-truth mismatch, a public-scope conflict, or absent/conflicting
+extension identity only when the captured evidence supports that distinction.
+It then requires ordinary registration of exact built-in
+`github.copilot-chat` 0.73.0 at the signed application path with the hashes
+above.
 
 After the owned app and children exit, the harness archives each changed
 synthetic settings/config/workspace file, classifies the exact delta, and
@@ -295,6 +335,9 @@ three destinations with no-follow semantics and validates owner, regular-file
 type, inode, and root containment before the first write. Any unexpected
 delta, path substitution, restoration error, server-cleanup error, or
 unsettled owned process forces a failed receipt and nonzero result.
+An unchanged setup file remains cleanup-safe and is restored normally, but it
+cannot qualify: native PASS requires both `classification.expected` and
+`expectedUiTransitionObserved`.
 
 Restoration additionally requires bounded proof that the entire captured
 detached process group is absent; main-process exit alone is insufficient.

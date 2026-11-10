@@ -7,11 +7,14 @@ const path = require("node:path");
 const vscode = require("vscode");
 const {
   AI_SETTING,
-  classifyExactSettingDelta,
   sha256Bytes,
 } = require("./agent-ui-policy.cjs");
 const { snapshotNativeState } = require("./capture-state.cjs");
 const { buildSafeExtensionInventory } = require("./inventory.cjs");
+const {
+  createLiveExtensionIdentityTracker,
+  observeNormalUiPhase,
+} = require("./normal-ui-phase-observer.cjs");
 const {
   SHARED_COPILOT_ROUTE,
   modelSelectorForRoute,
@@ -31,6 +34,9 @@ const PRE_QUERY =
   "SILMARIL_NATIVE_PREBLOCK_8d724ae7 request the private synthetic tool once";
 const POST_QUERY =
   "SILMARIL_NATIVE_POSTTOOL_8d724ae7 request the private poison tool once";
+const NORMAL_UI_PRIMARY_TIMEOUT_MS = 180_000;
+const NORMAL_UI_CONVERGENCE_TIMEOUT_MS = 10_000;
+const NORMAL_UI_POLL_INTERVAL_MS = 100;
 
 async function writeCapture(capturePath, value) {
   await fs.mkdir(path.dirname(capturePath), { recursive: true, mode: 0o700 });
@@ -81,21 +87,35 @@ async function verifyOrdinaryBuiltInCopilot(copilot) {
   assert.equal(copilot.packageJSON.version, expectedVersion);
   assert.equal(copilot.packageJSON.isBuiltin, true);
   assert.equal(copilot.extensionUri.scheme, "file");
+  const canonicalPath = await fs.realpath(copilot.extensionUri.fsPath);
+  const expectedCanonicalPath = await fs.realpath(expectedPath);
   assert.equal(
-    await fs.realpath(copilot.extensionUri.fsPath),
-    await fs.realpath(expectedPath),
+    canonicalPath,
+    expectedCanonicalPath,
     "Copilot did not register from the exact signed built-in location",
   );
+  const manifestSha256 =
+    await sha256File(path.join(expectedCanonicalPath, "package.json"));
   assert.equal(
-    await sha256File(path.join(expectedPath, "package.json")),
+    manifestSha256,
     expectedManifestSha256,
     "Registered Copilot manifest differs from the reviewed signed app",
   );
+  const sourceSha256 =
+    await sha256File(path.join(expectedCanonicalPath, "dist", "extension.js"));
   assert.equal(
-    await sha256File(path.join(expectedPath, "dist", "extension.js")),
+    sourceSha256,
     expectedSourceSha256,
     "Registered Copilot source differs from the reviewed signed app",
   );
+  const identity = {
+    id: copilot.id.toLowerCase(),
+    version: copilot.packageJSON.version,
+    isBuiltin: true,
+    canonicalPath,
+    manifestSha256,
+    sourceSha256,
+  };
   return {
     id: copilot.id,
     version: copilot.packageJSON.version,
@@ -103,9 +123,11 @@ async function verifyOrdinaryBuiltInCopilot(copilot) {
     location: {
       scheme: copilot.extensionUri.scheme,
       basename: path.basename(copilot.extensionUri.fsPath),
+      canonicalPath,
     },
-    manifestSha256: expectedManifestSha256,
-    sourceSha256: expectedSourceSha256,
+    manifestSha256,
+    sourceSha256,
+    identity,
   };
 }
 
@@ -129,6 +151,9 @@ function aiConfigurationCapture() {
 async function readUiStateFiles() {
   const profileSettingsPath =
     process.env.SILMARIL_NATIVE_PROFILE_SETTINGS_PATH;
+  const profileResolvedPath =
+    process.env.SILMARIL_NATIVE_PROFILE_RESOLVED_PATH;
+  const userDataPath = process.env.SILMARIL_NATIVE_USER_DATA_PATH;
   const workspaceFilePath =
     process.env.SILMARIL_NATIVE_WORKSPACE_FILE_PATH;
   assert.ok(
@@ -136,61 +161,35 @@ async function readUiStateFiles() {
     "Missing private profile-settings path",
   );
   assert.ok(
+    profileResolvedPath && path.isAbsolute(profileResolvedPath),
+    "Missing private profile directory path",
+  );
+  assert.ok(
+    userDataPath && path.isAbsolute(userDataPath),
+    "Missing private user-data path",
+  );
+  assert.ok(
     workspaceFilePath && path.isAbsolute(workspaceFilePath),
     "Missing owned workspace-file path",
   );
+  assert.equal(
+    await fs.realpath(path.dirname(profileSettingsPath)),
+    await fs.realpath(profileResolvedPath),
+    "Profile settings path does not belong to the declared private profile directory",
+  );
+  assert.equal(
+    await fs.realpath(path.dirname(profileResolvedPath)),
+    await fs.realpath(userDataPath),
+    "Private profile directory does not belong to the declared user-data directory",
+  );
   return {
+    profileResolvedPath,
     profileSettingsPath,
+    userDataPath,
     workspaceFilePath,
     profileSettingsBytes: await fs.readFile(profileSettingsPath),
     workspaceFileBytes: await fs.readFile(workspaceFilePath),
   };
-}
-
-function assertExpectedUiDelta(proof, description) {
-  assert.equal(
-    proof.state,
-    "expected-ui-delta",
-    `${description} was not the one exact approved ${AI_SETTING} delta`,
-  );
-}
-
-async function waitForConfigurationValue(expectedValue, timeoutMs) {
-  const current = aiConfigurationCapture();
-  if (current.effectiveValue === expectedValue) return current;
-  return await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      listener.dispose();
-      reject(new Error(
-        `Timed out waiting for public ${AI_SETTING}=${expectedValue} configuration event`,
-      ));
-    }, timeoutMs);
-    const listener = vscode.workspace.onDidChangeConfiguration((event) => {
-      if (!event.affectsConfiguration(AI_SETTING)) return;
-      try {
-        const capture = aiConfigurationCapture();
-        if (capture.effectiveValue !== expectedValue) return;
-        clearTimeout(timeout);
-        listener.dispose();
-        resolve(capture);
-      } catch (error) {
-        clearTimeout(timeout);
-        listener.dispose();
-        reject(error);
-      }
-    });
-  });
-}
-
-async function waitForExactFileDelta(read, classify, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let proof;
-  do {
-    proof = classify(await read());
-    if (proof.state === "expected-ui-delta") return proof;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  } while (Date.now() < deadline);
-  return proof;
 }
 
 async function waitForNormalUiAgentEnablement(currentInventory) {
@@ -234,8 +233,57 @@ async function waitForNormalUiAgentEnablement(currentInventory) {
     null,
     `Two-phase handoff requires no pre-existing workspace ${AI_SETTING}`,
   );
-
-  const phaseOneWait = waitForConfigurationValue(true, 180_000);
+  assert.equal(
+    beforeConfiguration.globalValue,
+    null,
+    `Two-phase handoff requires no pre-existing global ${AI_SETTING}`,
+  );
+  const observerPaths = {
+    profileResolvedPath: beforeFiles.profileResolvedPath,
+    profileSettingsPath: beforeFiles.profileSettingsPath,
+    userDataPath: beforeFiles.userDataPath,
+    workspaceFilePath: beforeFiles.workspaceFilePath,
+  };
+  const subscribeConfiguration = (listener) =>
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration(AI_SETTING)) listener();
+    });
+  const subscribeExtensions = (listener) =>
+    vscode.extensions.onDidChange(listener);
+  const readPhaseOneObservation = async () => ({
+    configuration: aiConfigurationCapture(),
+    observedProfileSettingsBytes:
+      await fs.readFile(beforeFiles.profileSettingsPath),
+    observedWorkspaceBytes:
+      await fs.readFile(beforeFiles.workspaceFilePath),
+    extensionIdentityState: "not-required",
+  });
+  const phaseOneWait = observeNormalUiPhase({
+    phase: "disable-profile",
+    paths: observerPaths,
+    beforeProfileSettingsBytes: beforeFiles.profileSettingsBytes,
+    beforeWorkspaceBytes: beforeFiles.workspaceFileBytes,
+    readObservation: readPhaseOneObservation,
+    stages: [
+      {
+        label: "matching-public-profile-configuration",
+        timeoutMs: NORMAL_UI_PRIMARY_TIMEOUT_MS,
+        timeOrigin:
+          "phase-one-observer-start-before-disable-ready-marker-publication",
+        isSatisfied: (proof) => proof.configurationMatches,
+      },
+      {
+        label: "exact-private-profile-file-delta",
+        timeoutMs: NORMAL_UI_CONVERGENCE_TIMEOUT_MS,
+        timeOrigin: "matching-public-profile-configuration-observed",
+        isSatisfied: (proof) => proof.exactFileDeltaMatches,
+      },
+    ],
+    pollIntervalMs: NORMAL_UI_POLL_INTERVAL_MS,
+    timeOrigin:
+      "phase-one-observer-start-before-disable-ready-marker-publication",
+    subscribeConfiguration,
+  });
   await writeImmutableCapture(disableReadyPath, {
     schemaVersion: 1,
     state: "normal-ui-disable-ai-required",
@@ -253,6 +301,14 @@ async function waitForNormalUiAgentEnablement(currentInventory) {
       ),
       workspaceFileSha256: sha256Bytes(beforeFiles.workspaceFileBytes),
     },
+    paths: observerPaths,
+    observer: {
+      primaryTimeoutMs: NORMAL_UI_PRIMARY_TIMEOUT_MS,
+      convergenceTimeoutMs: NORMAL_UI_CONVERGENCE_TIMEOUT_MS,
+      pollIntervalMs: NORMAL_UI_POLL_INTERVAL_MS,
+      timeOrigin:
+        "phase-one-observer-start-before-disable-ready-marker-publication",
+    },
     normalUiAction: {
       surface: "Extensions view",
       actionIdFromSignedSource: "extensions.disableAIGlobally",
@@ -260,59 +316,60 @@ async function waitForNormalUiAgentEnablement(currentInventory) {
       accountOrInstallPermitted: false,
     },
   });
-  const intermediateConfiguration = await phaseOneWait;
-  assert.equal(
-    intermediateConfiguration.globalValue,
-    true,
-    `Disable AI Features did not write private-profile ${AI_SETTING}=true`,
-  );
-  const profileDelta = await waitForExactFileDelta(
-    () => fs.readFile(beforeFiles.profileSettingsPath),
-    (observedBytes) => classifyExactSettingDelta({
-      baselineBytes: beforeFiles.profileSettingsBytes,
-      observedBytes,
-      value: true,
-      description: "private profile settings",
-    }),
-    10_000,
-  );
-  assertExpectedUiDelta(profileDelta, "Private profile settings");
-  const workspaceAfterPhaseOne = await fs.readFile(
-    beforeFiles.workspaceFilePath,
-  );
-  assert.deepEqual(
-    workspaceAfterPhaseOne,
-    beforeFiles.workspaceFileBytes,
-    "Disable AI Features changed the workspace file before phase 2",
-  );
+  const phaseOne = await phaseOneWait;
+  const intermediateConfiguration = phaseOne.proof.configuration;
+  const profileDelta = phaseOne.proof.profileDelta;
+  const workspaceAfterPhaseOne =
+    await fs.readFile(beforeFiles.workspaceFilePath);
 
-  let listener;
-  let timeout;
-  const extensionWait = new Promise((resolve, reject) => {
-    const inspect = async () => {
-      const extension = vscode.extensions.getExtension("github.copilot-chat");
-      if (!extension) return;
-      try {
-        const proof = await verifyOrdinaryBuiltInCopilot(extension);
-        clearTimeout(timeout);
-        listener.dispose();
-        resolve({ extension, proof });
-      } catch (error) {
-        clearTimeout(timeout);
-        listener.dispose();
-        reject(error);
-      }
+  const extensionIdentity = createLiveExtensionIdentityTracker({
+    getCurrentExtension: () =>
+      vscode.extensions.getExtension("github.copilot-chat"),
+    verifyExtension: verifyOrdinaryBuiltInCopilot,
+  });
+  const readPhaseTwoObservation = async () => {
+    const currentIdentity = await extensionIdentity.observe();
+    return {
+      configuration: aiConfigurationCapture(),
+      observedProfileSettingsBytes:
+        await fs.readFile(beforeFiles.profileSettingsPath),
+      observedWorkspaceBytes:
+        await fs.readFile(beforeFiles.workspaceFilePath),
+      extensionIdentityState: currentIdentity.state,
     };
-    listener = vscode.extensions.onDidChange(() => {
-      inspect().catch(reject);
-    });
-    timeout = setTimeout(() => {
-      listener.dispose();
-      reject(new Error(
-        "Timed out waiting for normal UI enablement of exact built-in GitHub Copilot Chat",
-      ));
-    }, 180_000);
-    inspect().catch(reject);
+  };
+  const phaseTwoWait = observeNormalUiPhase({
+    phase: "enable-workspace",
+    paths: observerPaths,
+    beforeProfileSettingsBytes: beforeFiles.profileSettingsBytes,
+    beforeWorkspaceBytes: beforeFiles.workspaceFileBytes,
+    readObservation: readPhaseTwoObservation,
+    stages: [
+      {
+        label: "signed-built-in-extension-registration",
+        timeoutMs: NORMAL_UI_PRIMARY_TIMEOUT_MS,
+        timeOrigin:
+          "phase-two-observer-start-before-workspace-enable-ready-marker-publication",
+        isSatisfied: (proof) => proof.extensionIdentityMatches,
+      },
+      {
+        label: "matching-public-workspace-configuration",
+        timeoutMs: NORMAL_UI_CONVERGENCE_TIMEOUT_MS,
+        timeOrigin: "signed-built-in-extension-identity-observed",
+        isSatisfied: (proof) => proof.configurationMatches,
+      },
+      {
+        label: "exact-workspace-file-delta",
+        timeoutMs: NORMAL_UI_CONVERGENCE_TIMEOUT_MS,
+        timeOrigin: "matching-public-workspace-configuration-observed",
+        isSatisfied: (proof) => proof.exactFileDeltaMatches,
+      },
+    ],
+    pollIntervalMs: NORMAL_UI_POLL_INTERVAL_MS,
+    timeOrigin:
+      "phase-two-observer-start-before-workspace-enable-ready-marker-publication",
+    subscribeConfiguration,
+    subscribeExtensions,
   });
   await writeImmutableCapture(workspaceEnableReadyPath, {
     schemaVersion: 1,
@@ -345,36 +402,21 @@ async function waitForNormalUiAgentEnablement(currentInventory) {
       workspaceFileSha256: sha256Bytes(workspaceAfterPhaseOne),
       currentInventory: extensionInventoryCapture(),
     },
+    paths: observerPaths,
+    observer: {
+      primaryTimeoutMs: NORMAL_UI_PRIMARY_TIMEOUT_MS,
+      convergenceTimeoutMs: NORMAL_UI_CONVERGENCE_TIMEOUT_MS,
+      pollIntervalMs: NORMAL_UI_POLL_INTERVAL_MS,
+      timeOrigin:
+        "phase-two-observer-start-before-workspace-enable-ready-marker-publication",
+    },
   });
-  const enabled = await extensionWait;
-  const afterConfiguration = await waitForConfigurationValue(false, 10_000);
-  assert.equal(
-    afterConfiguration.workspaceValue,
-    false,
-    `Enable AI Features (Workspace) did not write workspace ${AI_SETTING}=false`,
-  );
-  const afterFiles = await readUiStateFiles();
-  const finalProfileDelta = classifyExactSettingDelta({
-    baselineBytes: beforeFiles.profileSettingsBytes,
-    observedBytes: afterFiles.profileSettingsBytes,
-    value: true,
-    description: "private profile settings",
-  });
-  assertExpectedUiDelta(finalProfileDelta, "Private profile settings");
-  const workspaceDelta = await waitForExactFileDelta(
-    () => fs.readFile(beforeFiles.workspaceFilePath),
-    (observedBytes) => classifyExactSettingDelta({
-      baselineBytes: beforeFiles.workspaceFileBytes,
-      observedBytes,
-      container: "settings",
-      value: false,
-      description: "owned workspace file",
-    }),
-    10_000,
-  );
-  assertExpectedUiDelta(workspaceDelta, "Owned workspace file");
+  const phaseTwo = await phaseTwoWait;
+  const finalExtensionIdentity =
+    await extensionIdentity.verifyCurrentAccepted();
   return {
-    ...enabled,
+    extension: finalExtensionIdentity.extension,
+    proof: finalExtensionIdentity.proof,
     phases: {
       before: {
         configuration: beforeConfiguration,
@@ -388,12 +430,14 @@ async function waitForNormalUiAgentEnablement(currentInventory) {
         configuration: intermediateConfiguration,
         profileSettingsDelta: profileDelta,
         workspaceFileSha256: sha256Bytes(workspaceAfterPhaseOne),
+        observer: phaseOne.diagnostic.observer,
       },
       after: {
         markerPath: workspaceEnableReadyPath,
-        configuration: afterConfiguration,
-        profileSettingsDelta: finalProfileDelta,
-        workspaceFileDelta: workspaceDelta,
+        configuration: phaseTwo.proof.configuration,
+        profileSettingsDelta: phaseTwo.proof.profileDelta,
+        workspaceFileDelta: phaseTwo.proof.workspaceDelta,
+        observer: phaseTwo.diagnostic.observer,
       },
     },
   };
@@ -905,6 +949,12 @@ async function run() {
       name: error instanceof Error ? error.name : "Error",
       message: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
+      ...(error?.normalUiPhaseDiagnostic
+        ? {
+            normalUiPhaseDiagnostic:
+              error.normalUiPhaseDiagnostic,
+          }
+        : {}),
     };
     throw error;
   } finally {
