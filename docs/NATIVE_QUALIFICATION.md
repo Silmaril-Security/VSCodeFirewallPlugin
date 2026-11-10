@@ -191,8 +191,19 @@ effective/global/workspace scope, and normal registration of the exact signed
 built-in extension. The registry is re-read on every phase-2 observation;
 stable object identity may reuse its signed hash proof, but removal or
 replacement clears or re-verifies it. Final phase success freshly verifies
-that the currently registered object is the same accepted signed extension.
-File-only or public-event-only evidence fails closed.
+two independently read current wrappers and compares their immutable signed
+identity (`id`, version, built-in status, canonical full path, manifest hash,
+and source hash) with the accepted proof. Equivalent fresh API wrappers pass;
+an absent or identity-changed extension fails. File-only or public-event-only
+evidence fails closed.
+
+Every observation read is bounded by the unchanged active stage deadline. A
+result completing at or after that deadline cannot satisfy the stage. Read or
+JSON-classification failures produce only a safe category/code, phase and
+stage timing, event/poll counts, private paths, and hashes for bytes actually
+available; raw file contents and underlying error messages are never copied
+to diagnostics. Timed-out reads are ignored if they settle later, and all
+ordinary-event subscriptions are disposed on failure.
 
 ### Experimental shared Copilot route
 

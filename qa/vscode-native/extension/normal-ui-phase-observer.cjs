@@ -120,29 +120,31 @@ function phaseDiagnostic({
   paths,
   observer,
   proof,
+  failure,
   beforeProfileSettingsBytes,
   beforeWorkspaceBytes,
   observedProfileSettingsBytes,
   observedWorkspaceBytes,
+  observedConfiguration,
 }) {
   const supportedInterpretation = (() => {
-    if (proof.evidenceClassification === "no-approved-action-observed") {
+    if (proof?.evidenceClassification === "no-approved-action-observed") {
       return "no-approved-action-observed";
     }
     if (
-      proof.evidenceClassification
+      proof?.evidenceClassification
       === "public-configuration-matched-exact-file-delta-missing"
     ) {
       return "wrong-profile-or-profile-source-mismatch-possible-not-proven";
     }
     if (
-      proof.evidenceClassification
+      proof?.evidenceClassification
       === "exact-file-delta-observed-public-scope-conflict"
     ) {
       return "wrong-scope-or-public-configuration-conflict";
     }
     if (
-      proof.success
+      proof?.success
       && observer.eventCounts.configuration === 0
       && observer.eventCounts.extensions === 0
     ) {
@@ -150,12 +152,66 @@ function phaseDiagnostic({
     }
     return "no-more-specific-cause-proven";
   })();
+  const observedHash = (value) =>
+    value instanceof Uint8Array ? sha256Bytes(value) : undefined;
+  const profileObservedSha256 = observedHash(observedProfileSettingsBytes);
+  const workspaceObservedSha256 = observedHash(observedWorkspaceBytes);
+  const profileSettings = {
+    beforeSha256: sha256Bytes(beforeProfileSettingsBytes),
+    ...(profileObservedSha256 === undefined
+      ? {}
+      : { observedSha256: profileObservedSha256 }),
+    ...(proof?.profileDelta ? { delta: proof.profileDelta } : {}),
+  };
+  const workspace = {
+    beforeSha256: sha256Bytes(beforeWorkspaceBytes),
+    ...(workspaceObservedSha256 === undefined
+      ? {}
+      : { observedSha256: workspaceObservedSha256 }),
+    ...(proof?.workspaceDelta ? { delta: proof.workspaceDelta } : {}),
+  };
+  const safeConfiguration = (() => {
+    if (!observedConfiguration || typeof observedConfiguration !== "object") {
+      return undefined;
+    }
+    const result = {};
+    for (const key of [
+      "source",
+      "key",
+      "effectiveValue",
+      "defaultValue",
+      "globalValue",
+      "workspaceValue",
+      "workspaceFolderValue",
+    ]) {
+      const value = observedConfiguration[key];
+      if (
+        typeof value === "boolean"
+        || value === null
+        || (key === "key" && value === "chat.disableAIFeatures")
+        || (
+          key === "source"
+          && value === "vscode.workspace.getConfiguration().inspect()"
+        )
+      ) {
+        result[key] = value;
+      }
+    }
+    return result;
+  })();
   return {
     phase,
-    evidenceClassification: proof.evidenceClassification,
+    ...(proof?.evidenceClassification
+      ? { evidenceClassification: proof.evidenceClassification }
+      : {}),
     supportedInterpretation,
+    ...(failure ? { failure } : {}),
     observer,
-    configuration: proof.configuration,
+    ...(proof?.configuration
+      ? { configuration: proof.configuration }
+      : safeConfiguration
+        ? { configuration: safeConfiguration }
+        : {}),
     paths: {
       profileResolvedPath: paths.profileResolvedPath,
       profileSettingsPath: paths.profileSettingsPath,
@@ -163,16 +219,8 @@ function phaseDiagnostic({
       workspaceFilePath: paths.workspaceFilePath,
     },
     files: {
-      profileSettings: {
-        beforeSha256: sha256Bytes(beforeProfileSettingsBytes),
-        observedSha256: sha256Bytes(observedProfileSettingsBytes),
-        delta: proof.profileDelta,
-      },
-      workspace: {
-        beforeSha256: sha256Bytes(beforeWorkspaceBytes),
-        observedSha256: sha256Bytes(observedWorkspaceBytes),
-        delta: proof.workspaceDelta,
-      },
+      profileSettings,
+      workspace,
     },
   };
 }
@@ -183,16 +231,74 @@ function observerError(message, diagnostic) {
   return error;
 }
 
+async function readObservationBeforeDeadline(readObservation, deadlineMs) {
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) return { kind: "timeout" };
+  let timer;
+  const readOutcome = Promise.resolve()
+    .then(readObservation)
+    .then(
+      (observation) => ({ kind: "value", observation }),
+      () => ({ kind: "rejected" }),
+    );
+  const timeoutOutcome = new Promise((resolve) => {
+    timer = setTimeout(
+      () => resolve({ kind: "timeout" }),
+      remainingMs,
+    );
+  });
+  const outcome = await Promise.race([readOutcome, timeoutOutcome]);
+  clearTimeout(timer);
+  if (outcome.kind === "value" && Date.now() >= deadlineMs) {
+    return { kind: "timeout" };
+  }
+  return outcome;
+}
+
+function immutableExtensionIdentity(proof) {
+  const identity = proof?.identity;
+  if (
+    !identity
+    || typeof identity.id !== "string"
+    || typeof identity.version !== "string"
+    || identity.isBuiltin !== true
+    || typeof identity.canonicalPath !== "string"
+    || typeof identity.manifestSha256 !== "string"
+    || typeof identity.sourceSha256 !== "string"
+  ) {
+    throw new Error("Verified extension proof lacks immutable identity");
+  }
+  return {
+    id: identity.id,
+    version: identity.version,
+    isBuiltin: identity.isBuiltin,
+    canonicalPath: identity.canonicalPath,
+    manifestSha256: identity.manifestSha256,
+    sourceSha256: identity.sourceSha256,
+  };
+}
+
+function sameImmutableExtensionIdentity(left, right) {
+  return left.id === right.id
+    && left.version === right.version
+    && left.isBuiltin === right.isBuiltin
+    && left.canonicalPath === right.canonicalPath
+    && left.manifestSha256 === right.manifestSha256
+    && left.sourceSha256 === right.sourceSha256;
+}
+
 function createLiveExtensionIdentityTracker({
   getCurrentExtension,
   verifyExtension,
 }) {
-  let acceptedExtension;
+  let stableExtensionReference;
   let acceptedProof;
+  let acceptedIdentity;
 
   const clear = () => {
-    acceptedExtension = undefined;
+    stableExtensionReference = undefined;
     acceptedProof = undefined;
+    acceptedIdentity = undefined;
   };
 
   return {
@@ -202,21 +308,30 @@ function createLiveExtensionIdentityTracker({
         clear();
         return { state: "absent" };
       }
-      if (current === acceptedExtension && acceptedProof) {
+      if (current === stableExtensionReference && acceptedProof) {
         return {
           state: "verified",
-          extension: acceptedExtension,
+          extension: stableExtensionReference,
           proof: acceptedProof,
           proofSource: "stable-reference-cache",
         };
       }
       try {
         const proof = await verifyExtension(current);
-        acceptedExtension = current;
+        const identity = immutableExtensionIdentity(proof);
+        if (
+          acceptedIdentity
+          && !sameImmutableExtensionIdentity(acceptedIdentity, identity)
+        ) {
+          clear();
+          return { state: "conflict" };
+        }
+        stableExtensionReference = current;
         acceptedProof = proof;
+        acceptedIdentity = identity;
         return {
           state: "verified",
-          extension: acceptedExtension,
+          extension: stableExtensionReference,
           proof: acceptedProof,
           proofSource: "fresh-verification",
         };
@@ -234,24 +349,45 @@ function createLiveExtensionIdentityTracker({
           "Signed built-in extension was absent at final phase-two verification",
         );
       }
-      if (before !== acceptedExtension || !acceptedProof) {
+      if (!acceptedIdentity || !acceptedProof) {
         clear();
         throw new Error(
-          "Currently registered extension does not match the phase-two accepted extension",
+          "Phase two has no accepted signed extension identity",
         );
       }
-      const proof = await verifyExtension(before);
+      const beforeProof = await verifyExtension(before);
+      const beforeIdentity = immutableExtensionIdentity(beforeProof);
+      if (
+        !sameImmutableExtensionIdentity(acceptedIdentity, beforeIdentity)
+      ) {
+        clear();
+        throw new Error(
+          "Currently registered extension identity differs from the phase-two accepted identity",
+        );
+      }
       const after = getCurrentExtension();
-      if (after !== before) {
+      if (!after) {
         clear();
         throw new Error(
-          "Registered extension changed during final phase-two verification",
+          "Signed built-in extension was removed during final phase-two verification",
         );
       }
-      acceptedProof = proof;
+      const afterProof = await verifyExtension(after);
+      const afterIdentity = immutableExtensionIdentity(afterProof);
+      if (
+        !sameImmutableExtensionIdentity(acceptedIdentity, afterIdentity)
+        || !sameImmutableExtensionIdentity(beforeIdentity, afterIdentity)
+      ) {
+        clear();
+        throw new Error(
+          "Registered extension immutable identity changed during final phase-two verification",
+        );
+      }
+      stableExtensionReference = after;
+      acceptedProof = afterProof;
       return {
-        extension: before,
-        proof,
+        extension: after,
+        proof: afterProof,
         proofSource: "fresh-final-verification",
       };
     },
@@ -328,6 +464,8 @@ async function observeNormalUiPhase({
 
   let observation;
   let proof;
+  let lastObservation;
+  let lastProof;
   try {
     for (const stage of stages) {
       const stageStartedAtMs = Date.now();
@@ -342,54 +480,115 @@ async function observeNormalUiPhase({
       observer.stages.push(stageReceipt);
       while (true) {
         observer.pollCount += 1;
-        observation = await readObservation();
-        proof = classifyNormalUiPhase({
-          phase,
-          beforeProfileSettingsBytes,
-          beforeWorkspaceBytes,
-          observedProfileSettingsBytes:
-            observation.observedProfileSettingsBytes,
-          observedWorkspaceBytes: observation.observedWorkspaceBytes,
-          configuration: observation.configuration,
-          extensionIdentityState: observation.extensionIdentityState,
-        });
-        if (proof.terminalIdentityConflict) {
+        observation = undefined;
+        proof = undefined;
+        const failStage = (
+          code,
+          category,
+          message,
+          useLastEvidence = false,
+        ) => {
+          const diagnosticObservation = observation
+            ?? (useLastEvidence ? lastObservation : undefined);
+          const diagnosticProof = proof
+            ?? (useLastEvidence ? lastProof : undefined);
+          stageReceipt.failedAt = new Date().toISOString();
           const diagnostic = phaseDiagnostic({
             phase,
             paths,
             observer,
-            proof,
+            proof: diagnosticProof,
+            failure: {
+              code,
+              category,
+              stage: stage.label,
+            },
+            beforeProfileSettingsBytes,
+            beforeWorkspaceBytes,
+            observedProfileSettingsBytes:
+              diagnosticObservation?.observedProfileSettingsBytes,
+            observedWorkspaceBytes:
+              diagnosticObservation?.observedWorkspaceBytes,
+            observedConfiguration:
+              diagnosticObservation?.configuration,
+          });
+          throw observerError(message, diagnostic);
+        };
+        const readOutcome = await readObservationBeforeDeadline(
+          readObservation,
+          deadlineMs,
+        );
+        if (readOutcome.kind === "timeout") {
+          failStage(
+            "NORMAL_UI_OBSERVATION_READ_TIMEOUT",
+            "observation-read-timeout",
+            `Normal-UI ${phase} observation read exceeded the bounded stage deadline`,
+            true,
+          );
+        }
+        if (readOutcome.kind === "rejected") {
+          failStage(
+            "NORMAL_UI_OBSERVATION_READ_FAILED",
+            "observation-read-failure",
+            `Normal-UI ${phase} observation read failed`,
+            true,
+          );
+        }
+        observation = readOutcome.observation;
+        try {
+          proof = classifyNormalUiPhase({
+            phase,
             beforeProfileSettingsBytes,
             beforeWorkspaceBytes,
             observedProfileSettingsBytes:
               observation.observedProfileSettingsBytes,
             observedWorkspaceBytes: observation.observedWorkspaceBytes,
+            configuration: observation.configuration,
+            extensionIdentityState: observation.extensionIdentityState,
           });
-          throw observerError(
-            `Normal-UI ${phase} observed a conflicting signed extension identity`,
-            diagnostic,
+        } catch {
+          failStage(
+            "NORMAL_UI_OBSERVATION_CLASSIFICATION_FAILED",
+            "observation-classification-failure",
+            `Normal-UI ${phase} observation classification failed`,
           );
         }
-        if (stage.isSatisfied(proof)) {
+        lastObservation = observation;
+        lastProof = proof;
+        if (proof.terminalIdentityConflict) {
+          failStage(
+            "NORMAL_UI_EXTENSION_IDENTITY_CONFLICT",
+            "extension-identity-conflict",
+            `Normal-UI ${phase} observed a conflicting signed extension identity`,
+          );
+        }
+        let satisfied;
+        try {
+          satisfied = stage.isSatisfied(proof);
+        } catch {
+          failStage(
+            "NORMAL_UI_STAGE_EVALUATION_FAILED",
+            "stage-evaluation-failure",
+            `Normal-UI ${phase} stage evaluation failed`,
+          );
+        }
+        if (satisfied) {
+          if (Date.now() >= deadlineMs) {
+            failStage(
+              "NORMAL_UI_STAGE_TIMEOUT",
+              "stage-timeout",
+              `Normal-UI ${phase} stage deadline elapsed before proof acceptance`,
+            );
+          }
           stageReceipt.completedAt = new Date().toISOString();
           break;
         }
         const remainingMs = deadlineMs - Date.now();
         if (remainingMs <= 0) {
-          const diagnostic = phaseDiagnostic({
-            phase,
-            paths,
-            observer,
-            proof,
-            beforeProfileSettingsBytes,
-            beforeWorkspaceBytes,
-            observedProfileSettingsBytes:
-              observation.observedProfileSettingsBytes,
-            observedWorkspaceBytes: observation.observedWorkspaceBytes,
-          });
-          throw observerError(
+          failStage(
+            "NORMAL_UI_STAGE_TIMEOUT",
+            "stage-timeout",
             `Timed out in normal-UI ${phase} stage ${stage.label}`,
-            diagnostic,
           );
         }
         await new Promise((resolve) => {
@@ -414,6 +613,10 @@ async function observeNormalUiPhase({
         paths,
         observer,
         proof,
+        failure: {
+          code: "NORMAL_UI_PHASE_INCOMPLETE",
+          category: "phase-proof-incomplete",
+        },
         beforeProfileSettingsBytes,
         beforeWorkspaceBytes,
         observedProfileSettingsBytes:

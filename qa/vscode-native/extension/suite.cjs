@@ -87,21 +87,35 @@ async function verifyOrdinaryBuiltInCopilot(copilot) {
   assert.equal(copilot.packageJSON.version, expectedVersion);
   assert.equal(copilot.packageJSON.isBuiltin, true);
   assert.equal(copilot.extensionUri.scheme, "file");
+  const canonicalPath = await fs.realpath(copilot.extensionUri.fsPath);
+  const expectedCanonicalPath = await fs.realpath(expectedPath);
   assert.equal(
-    await fs.realpath(copilot.extensionUri.fsPath),
-    await fs.realpath(expectedPath),
+    canonicalPath,
+    expectedCanonicalPath,
     "Copilot did not register from the exact signed built-in location",
   );
+  const manifestSha256 =
+    await sha256File(path.join(expectedCanonicalPath, "package.json"));
   assert.equal(
-    await sha256File(path.join(expectedPath, "package.json")),
+    manifestSha256,
     expectedManifestSha256,
     "Registered Copilot manifest differs from the reviewed signed app",
   );
+  const sourceSha256 =
+    await sha256File(path.join(expectedCanonicalPath, "dist", "extension.js"));
   assert.equal(
-    await sha256File(path.join(expectedPath, "dist", "extension.js")),
+    sourceSha256,
     expectedSourceSha256,
     "Registered Copilot source differs from the reviewed signed app",
   );
+  const identity = {
+    id: copilot.id.toLowerCase(),
+    version: copilot.packageJSON.version,
+    isBuiltin: true,
+    canonicalPath,
+    manifestSha256,
+    sourceSha256,
+  };
   return {
     id: copilot.id,
     version: copilot.packageJSON.version,
@@ -109,9 +123,11 @@ async function verifyOrdinaryBuiltInCopilot(copilot) {
     location: {
       scheme: copilot.extensionUri.scheme,
       basename: path.basename(copilot.extensionUri.fsPath),
+      canonicalPath,
     },
-    manifestSha256: expectedManifestSha256,
-    sourceSha256: expectedSourceSha256,
+    manifestSha256,
+    sourceSha256,
+    identity,
   };
 }
 

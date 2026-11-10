@@ -1103,6 +1103,8 @@ test("native suite uses the normalized signed built-in Copilot identifier", asyn
   assert.match(suite, /observeNormalUiPhase/u);
   assert.match(suite, /createLiveExtensionIdentityTracker/u);
   assert.match(suite, /extensionIdentity\.verifyCurrentAccepted\(\)/u);
+  assert.match(suite, /canonicalPath/u);
+  assert.match(suite, /identity,/u);
   assert.match(suite, /normal-ui-disable-ai-required/u);
   assert.match(suite, /normal-ui-workspace-ai-enable-required/u);
   assert.match(suite, /writeImmutableCapture/u);
@@ -1804,6 +1806,31 @@ const workspaceEnabledAiConfiguration = {
   globalValue: true,
   workspaceValue: false,
 };
+const testSignedExtensionIdentity = {
+  id: "github.copilot-chat",
+  version: "0.73.0",
+  isBuiltin: true,
+  canonicalPath: "/signed/VSCode.app/extensions/copilot",
+  manifestSha256: "manifest-sha256",
+  sourceSha256: "source-sha256",
+};
+
+function testSignedExtensionProof(
+  overrides: Partial<typeof testSignedExtensionIdentity> = {},
+) {
+  return {
+    identity: {
+      ...testSignedExtensionIdentity,
+      ...overrides,
+    },
+  };
+}
+
+function waitForMilliseconds(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
 
 function phaseOneObserverOptions(
   readObservation: () => Promise<Record<string, unknown>>,
@@ -1873,6 +1900,33 @@ function phaseTwoObserverOptions(
     ],
     pollIntervalMs: 2,
     timeOrigin: "test-phase-two-start",
+  };
+}
+
+function boundedObserverOptions(
+  readObservation: () => Promise<Record<string, unknown>>,
+  timeoutMs: number,
+  subscribeConfiguration?: (
+    listener: () => void,
+  ) => { dispose(): void },
+) {
+  return {
+    phase: "disable-profile",
+    paths: observerPaths,
+    beforeProfileSettingsBytes: observerBeforeProfile,
+    beforeWorkspaceBytes: observerBeforeWorkspace,
+    readObservation,
+    stages: [
+      {
+        label: "bounded-test-proof",
+        timeoutMs,
+        timeOrigin: "bounded-test-start",
+        isSatisfied: (proof: Record<string, any>) => proof.success,
+      },
+    ],
+    pollIntervalMs: 20,
+    timeOrigin: "bounded-test-start",
+    subscribeConfiguration,
   };
 }
 
@@ -1964,6 +2018,166 @@ test("normal UI observer rejects file-only and conflicting public scope", async 
   }
 });
 
+test("normal UI observer rejects a matching observation that completes after its deadline", async () => {
+  let lateFulfilled = false;
+  let settlement = "pending";
+  const startedAt = Date.now();
+  const pending = observeNormalUiPhase(boundedObserverOptions(
+    async () => {
+      await waitForMilliseconds(140);
+      lateFulfilled = true;
+      return {
+        configuration: disabledAiConfiguration,
+        observedProfileSettingsBytes: observerAfterProfile,
+        observedWorkspaceBytes: observerBeforeWorkspace,
+        extensionIdentityState: "not-required",
+      };
+    },
+    80,
+  ));
+  await assert.rejects(pending, (error: any) => {
+    settlement = "rejected";
+    assert.equal(
+      error.normalUiPhaseDiagnostic.failure.code,
+      "NORMAL_UI_OBSERVATION_READ_TIMEOUT",
+    );
+    return true;
+  });
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs >= 60 && elapsedMs < 300);
+  await waitForMilliseconds(100);
+  assert.equal(lateFulfilled, true);
+  assert.equal(settlement, "rejected");
+});
+
+test("normal UI observer bounds a never-settling read and disposes subscriptions", async () => {
+  let disposed = false;
+  const startedAt = Date.now();
+  await assert.rejects(
+    observeNormalUiPhase(boundedObserverOptions(
+      async () => await new Promise(() => {}),
+      80,
+      () => ({
+        dispose() {
+          disposed = true;
+        },
+      }),
+    )),
+    (error: any) => {
+      assert.equal(
+        error.normalUiPhaseDiagnostic.failure.category,
+        "observation-read-timeout",
+      );
+      return true;
+    },
+  );
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs >= 60 && elapsedMs < 300);
+  assert.equal(disposed, true);
+});
+
+test("normal UI observer accepts a timely matching bounded read", async () => {
+  const result = await observeNormalUiPhase(boundedObserverOptions(
+    async () => {
+      await waitForMilliseconds(20);
+      return {
+        configuration: disabledAiConfiguration,
+        observedProfileSettingsBytes: observerAfterProfile,
+        observedWorkspaceBytes: observerBeforeWorkspace,
+        extensionIdentityState: "not-required",
+      };
+    },
+    150,
+  ));
+  assert.equal(result.proof.success, true);
+});
+
+test("normal UI observer sanitizes read failures and records only available evidence", async () => {
+  let disposed = false;
+  await assert.rejects(
+    observeNormalUiPhase(boundedObserverOptions(
+      async () => {
+        throw new Error("RAW_PRIVATE_READ_ERROR_MUST_NOT_LEAK");
+      },
+      150,
+      () => ({
+        dispose() {
+          disposed = true;
+        },
+      }),
+    )),
+    (error: any) => {
+      assert.equal(
+        error.normalUiPhaseDiagnostic.failure.code,
+        "NORMAL_UI_OBSERVATION_READ_FAILED",
+      );
+      assert.equal(
+        error.normalUiPhaseDiagnostic.failure.category,
+        "observation-read-failure",
+      );
+      assert.equal(
+        Object.hasOwn(
+          error.normalUiPhaseDiagnostic.files.profileSettings,
+          "observedSha256",
+        ),
+        false,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(error.normalUiPhaseDiagnostic),
+        /RAW_PRIVATE_READ_ERROR_MUST_NOT_LEAK/u,
+      );
+      assert.doesNotMatch(
+        error.message,
+        /RAW_PRIVATE_READ_ERROR_MUST_NOT_LEAK/u,
+      );
+      return true;
+    },
+  );
+  assert.equal(disposed, true);
+});
+
+test("normal UI observer sanitizes invalid observed JSON while retaining hashes", async () => {
+  const invalidProfileBytes = Buffer.from(
+    '{"RAW_PRIVATE_FILE_CONTENT_MUST_NOT_LEAK":',
+  );
+  await assert.rejects(
+    observeNormalUiPhase(boundedObserverOptions(
+      async () => ({
+        configuration: disabledAiConfiguration,
+        observedProfileSettingsBytes: invalidProfileBytes,
+        observedWorkspaceBytes: observerBeforeWorkspace,
+        extensionIdentityState: "not-required",
+      }),
+      150,
+    )),
+    (error: any) => {
+      const diagnostic = error.normalUiPhaseDiagnostic;
+      assert.equal(
+        diagnostic.failure.code,
+        "NORMAL_UI_OBSERVATION_CLASSIFICATION_FAILED",
+      );
+      assert.equal(
+        diagnostic.failure.category,
+        "observation-classification-failure",
+      );
+      assert.equal(
+        typeof diagnostic.files.profileSettings.observedSha256,
+        "string",
+      );
+      assert.equal(
+        Object.hasOwn(diagnostic.files.profileSettings, "delta"),
+        false,
+      );
+      assert.equal(diagnostic.configuration.globalValue, true);
+      assert.doesNotMatch(
+        JSON.stringify(diagnostic),
+        /RAW_PRIVATE_FILE_CONTENT_MUST_NOT_LEAK/u,
+      );
+      return true;
+    },
+  );
+});
+
 test("normal UI phase classification distinguishes unchanged and wrong-profile evidence", () => {
   const unchanged = classifyNormalUiPhase({
     phase: "disable-profile",
@@ -2003,7 +2217,7 @@ test("phase two passes without events only with live signed identity, exact scop
     verifyExtension: async (candidate: object) => {
       assert.equal(candidate, extension);
       verificationCount += 1;
-      return { signed: true, verificationCount };
+      return testSignedExtensionProof();
     },
   });
   const result = await observeNormalUiPhase(phaseTwoObserverOptions(
@@ -2026,7 +2240,7 @@ test("phase two passes without events only with live signed identity, exact scop
   const finalIdentity = await identity.verifyCurrentAccepted();
   assert.equal(finalIdentity.extension, extension);
   assert.equal(finalIdentity.proofSource, "fresh-final-verification");
-  assert.equal(verificationCount, 2);
+  assert.equal(verificationCount, 3);
   currentExtension = undefined;
 });
 
@@ -2069,7 +2283,7 @@ test("phase two rejects wrong public scope and partial exact deltas", async () =
     const extension = { id: "github.copilot-chat" };
     const identity = createLiveExtensionIdentityTracker({
       getCurrentExtension: () => extension,
-      verifyExtension: async () => ({ signed: true }),
+      verifyExtension: async () => testSignedExtensionProof(),
     });
     await assert.rejects(
       observeNormalUiPhase(phaseTwoObserverOptions(async () => {
@@ -2107,7 +2321,7 @@ test("phase two cannot pass after the accepted extension is removed before conve
   let reads = 0;
   const identity = createLiveExtensionIdentityTracker({
     getCurrentExtension: () => currentExtension,
-    verifyExtension: async () => ({ signed: true }),
+    verifyExtension: async () => testSignedExtensionProof(),
   });
   await assert.rejects(
     observeNormalUiPhase(phaseTwoObserverOptions(async () => {
@@ -2125,28 +2339,60 @@ test("phase two cannot pass after the accepted extension is removed before conve
   );
 });
 
-test("live extension tracker re-verifies replacements and rejects stale final identity", async () => {
-  const first = { id: "github.copilot-chat", generation: 1 };
-  const second = { id: "github.copilot-chat", generation: 2 };
-  let current: object | undefined = first;
+test("live extension tracker accepts equivalent fresh wrappers by immutable identity", async () => {
+  let wrapperSequence = 0;
   let verificationCount = 0;
   const identity = createLiveExtensionIdentityTracker({
-    getCurrentExtension: () => current,
-    verifyExtension: async (extension: object) => {
+    getCurrentExtension: () => ({
+      id: "github.copilot-chat",
+      wrapperSequence: ++wrapperSequence,
+    }),
+    verifyExtension: async () => {
       verificationCount += 1;
-      return { extension, verificationCount };
+      return testSignedExtensionProof();
     },
   });
   assert.equal((await identity.observe()).proofSource, "fresh-verification");
-  assert.equal((await identity.observe()).proofSource, "stable-reference-cache");
-  assert.equal(verificationCount, 1);
-  current = second;
   assert.equal((await identity.observe()).proofSource, "fresh-verification");
   assert.equal(verificationCount, 2);
-  current = first;
+  const finalIdentity = await identity.verifyCurrentAccepted();
+  assert.equal(finalIdentity.proofSource, "fresh-final-verification");
+  assert.equal(verificationCount, 4);
+});
+
+test("live extension tracker rejects immutable identity replacement during final verification", async () => {
+  let getterCalls = 0;
+  const identity = createLiveExtensionIdentityTracker({
+    getCurrentExtension: () => ({
+      id: "github.copilot-chat",
+      identityGeneration: ++getterCalls >= 3 ? 2 : 1,
+    }),
+    verifyExtension: async (extension: any) =>
+      testSignedExtensionProof(
+        extension.identityGeneration === 2
+          ? { sourceSha256: "replacement-source-sha256" }
+          : {},
+      ),
+  });
+  assert.equal((await identity.observe()).state, "verified");
   await assert.rejects(
     identity.verifyCurrentAccepted(),
-    /does not match the phase-two accepted extension/u,
+    /immutable identity changed during final phase-two verification/u,
+  );
+});
+
+test("live extension tracker rejects removal before final verification", async () => {
+  const extension = { id: "github.copilot-chat" };
+  let currentExtension: object | undefined = extension;
+  const identity = createLiveExtensionIdentityTracker({
+    getCurrentExtension: () => currentExtension,
+    verifyExtension: async () => testSignedExtensionProof(),
+  });
+  assert.equal((await identity.observe()).state, "verified");
+  currentExtension = undefined;
+  await assert.rejects(
+    identity.verifyCurrentAccepted(),
+    /absent at final phase-two verification/u,
   );
 });
 
