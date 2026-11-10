@@ -46,11 +46,30 @@ direct GUI, remote, or native-host protection.
 
 SilmarilMacOS manages local installation and configuration. Plugin 0.3.0
 retains its historical requirements. Candidate 0.3.1 requires macOS, Node.js 22
-or newer, and VS Code 1.141.1 or newer; managed admission must reject 1.141.0
-and every earlier version without changing the existing protection state.
-Exact native qualification of both 1.141.1 and current stable 1.145.2 is still
-required before publication. The locally installed 1.145.0 application is not
-either required version and was not used as substitute proof.
+or newer, and VS Code 1.145.2 or newer; managed admission must reject every
+earlier version without changing the existing protection state. Version
+1.145.2 is the conservative source target and security-admission floor, not a
+qualified supported floor or a claim that it is the earliest possible upstream
+version. Signed VS Code 1.141.1 lacks the required transformed-prompt and
+post-tool replacement contracts and is not qualified.
+
+The exact signed 1.145.2 native matrix has run and **failed**. Its built-in
+Local route blocked the main malicious agent prompt and denied pre-tool
+execution, but a title-generation model request sent the blocked prompt before
+`UserPromptSubmit`, and the raw blocked post-tool result reached the next dummy
+model request. The shared Agent Host replacement contracts remain source-only
+and unqualified until a supported shared route exercises them. No universal
+title-confidentiality or native protection claim follows from the current
+source checks, and candidate 0.3.1 must not be published on this evidence.
+
+Native QA receipt `pass` is scoped only to the four-case allow, prompt-block,
+pre-tool-block, and post-tool-block core. Every receipt separately keeps full
+release qualification `incomplete`, batch/resume `unsupported`, and native
+Warn/Shadow `unassessed`. The shared route remains `unverified` unless every
+required classifier callback has exact `copilot` runtime metadata and its
+corresponding `userPromptTransformed`, `preToolUse`, or `postToolUse` event.
+Neither source preflight nor a four-case core pass qualifies 0.3.1 for
+publication.
 
 The manifest uses the portable `command` field, but `scripts/run-hook.sh`
 intentionally supports only the managed macOS installation. On an unsupported
@@ -90,13 +109,21 @@ A valid shared submitted-prompt callback returns `{}` without classification.
 The transformed prompt is classified byte-for-byte, including leading,
 trailing, and empty content; empty non-transformed content is skipped.
 
-### Runtime-specific outputs
+### Source-level runtime output contracts
 
-Local outputs are unchanged: Warn returns the fixed warning through Local
-continuation/context fields. Block stops a prompt, returns Local's nested tool
-denial before execution, or returns the legacy post-tool block response.
+The candidate's Local outputs are unchanged: Warn returns the fixed warning
+through Local continuation/context fields. Block stops a prompt, returns
+Local's nested tool denial before execution, or returns the legacy post-tool
+block response. In the exact signed 1.145.2 built-in Local route,
+`PostToolUse` can only append block/context to the original tool result; it
+cannot replace that result. The host starts the async append without awaiting
+it. Native testing observed the hook start but not finish before the strict
+suite failure, and the unredacted result was already present in the next dummy
+model request.
 
-Shared Copilot output follows the event-specific command-hook contract:
+The candidate implements the following shared Copilot command-hook source
+contract. It remains unqualified until a supported shared Agent Host route
+exercises it:
 
 - `userPromptSubmitted` returns `{}` without classification. The registration
   remains solely for Local compatibility.
@@ -173,13 +200,18 @@ Primary contracts used for this implementation:
 ## Native qualification and managed propagation
 
 Handler, launcher, loopback, and archive checks are not native-host proof.
-Before publishing 0.3.1, run the exact isolated qualification in
-[`docs/NATIVE_QUALIFICATION.md`](docs/NATIVE_QUALIFICATION.md) against separate
-VS Code 1.141.1 and 1.145.2 application copies. The managed macOS change must
-then propagate the reviewed 0.3.1 event and output contract into the managed
-signed runtime and managed manifest, set controller and generated-manifest
-minimums to 1.141.1, retain explicit unsupported reporting without silently
-enabling or disabling protection, update managed payload hashes and tests, and
-identify the exact qualified receipt. Do not claim byte identity between the
-standalone and managed delivery forms. Do not modify or relabel the existing
-0.3.0 release or previously signed macOS artifacts.
+The exact isolated signed 1.145.2 matrix in
+[`docs/NATIVE_QUALIFICATION.md`](docs/NATIVE_QUALIFICATION.md) failed its
+strict all-provider-disclosure and post-tool-poison oracles. Retain signed
+1.141.1 negative source evidence as boundary evidence, not compatibility
+evidence. Fresh `HOME` and user-data directories do not isolate the macOS
+Keychain; the synthetic no-account test harness must also use and verify VS
+Code's ephemeral in-memory secret storage. No native pass has been recorded.
+The public native command is preflight-only by default; its optional human
+workflow requires a new owned synthetic root, an explicit one-launch gate, and
+three contained markers for normal trust and the source-verified two-phase
+Extensions UI setup. Do not publish 0.3.1 or propagate a supported-floor claim
+until a reviewed native matrix passes without weakening the title-request or
+post-tool-result oracles. Do not claim byte identity between the standalone
+and managed delivery forms. Do not modify or relabel the existing 0.3.0
+release or previously signed macOS artifacts.
