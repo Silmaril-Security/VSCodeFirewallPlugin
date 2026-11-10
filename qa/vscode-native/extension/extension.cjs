@@ -1,7 +1,10 @@
 "use strict";
 
+const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const path = require("node:path");
 const vscode = require("vscode");
+const { createProviderJournal } = require("./provider-journal.cjs");
 
 const VENDOR = "silmaril-native-qa-dummy-8d724ae7";
 const MODEL_ID = "silmaril-native-qa-local-deterministic-8d724ae7";
@@ -72,6 +75,17 @@ function toolForRequest(strings) {
 }
 
 async function activate(context) {
+  const journalPath = process.env.SILMARIL_NATIVE_PROVIDER_JOURNAL_PATH;
+  assert.ok(
+    journalPath && path.isAbsolute(journalPath),
+    "Missing private provider journal path",
+  );
+  const journal = await createProviderJournal(journalPath);
+  context.subscriptions.push({
+    dispose() {
+      void journal.close();
+    },
+  });
   const model = {
     id: MODEL_ID,
     name: "Silmaril Native QA Local Deterministic Dummy",
@@ -102,7 +116,7 @@ async function activate(context) {
       const strings = collectStrings(serializedMessages);
       const tool = toolForRequest(strings);
       state.providerCallCount += 1;
-      state.providerRequests.push({
+      const providerRequest = {
         sequence: state.providerCallCount,
         model: {
           id: selectedModel.id,
@@ -112,6 +126,12 @@ async function activate(context) {
         messages: serializedMessages,
         tools: (options.tools ?? []).map((entry) => entry.name),
         toolMode: options.toolMode,
+      };
+      state.providerRequests.push(providerRequest);
+      await journal.append({
+        type: "provider-request",
+        providerSequence: state.providerCallCount,
+        request: providerRequest,
       });
 
       if (tool && !state.issuedToolCalls.has(tool)) {
@@ -140,6 +160,11 @@ async function activate(context) {
   context.subscriptions.push(vscode.lm.registerTool(PRE_TOOL, {
     async invoke() {
       state.toolInvocations[PRE_TOOL] += 1;
+      await journal.append({
+        type: "tool-invocation",
+        toolName: PRE_TOOL,
+        invocationCount: state.toolInvocations[PRE_TOOL],
+      });
       const markerPath = process.env.SILMARIL_NATIVE_PRE_MARKER_PATH;
       if (!markerPath) throw new Error("Missing private pre-tool marker path");
       await fs.writeFile(markerPath, `${PRE_MARKER}\n`, { mode: 0o600 });
@@ -152,6 +177,11 @@ async function activate(context) {
   context.subscriptions.push(vscode.lm.registerTool(POST_TOOL, {
     async invoke() {
       state.toolInvocations[POST_TOOL] += 1;
+      await journal.append({
+        type: "tool-invocation",
+        toolName: POST_TOOL,
+        invocationCount: state.toolInvocations[POST_TOOL],
+      });
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(POISON_MARKER),
       ]);
@@ -170,6 +200,7 @@ async function activate(context) {
       POISON_MARKER,
     },
     collectStrings,
+    journal,
   };
 }
 

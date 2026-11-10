@@ -188,6 +188,19 @@ type, inode, and root containment before the first write. Any unexpected
 delta, path substitution, restoration error, server-cleanup error, or
 unsettled owned process forces a failed receipt and nonzero result.
 
+Restoration additionally requires bounded proof that the entire captured
+detached process group is absent; main-process exit alone is insufficient.
+After the TERM grace period, cleanup waits for group absence after KILL and
+fails without restoring if identity, inspection, termination, or absence
+cannot be proved. Classifier and proxy cleanup tracks accepted sockets and
+both CONNECT peers and has a bounded close deadline.
+
+Provider requests and synthetic tool invocation counts are also fsynced as
+append-only private NDJSON observations while they occur. These rows are
+explicitly in-progress and unfinished. Their integrity and retained trailing
+partial line are recorded on every native-launch outcome, but they never
+replace the finished provider capture or satisfy a native acceptance oracle.
+
 ## Full release acceptance matrix
 
 The current native harness executes only the four-case core described above.

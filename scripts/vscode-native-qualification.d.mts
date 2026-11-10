@@ -8,6 +8,30 @@ export function byteReceipt(value: string): {
 
 export function collectStrings(value: unknown, output?: string[]): string[];
 
+export function inspectProviderJournal(filePath: string): Promise<{
+  path: string;
+  sha256: string;
+  byteLength: number;
+  integrity: "pass" | "fail";
+  validRecordCount: number;
+  records: Array<Record<string, any>>;
+  errors: Array<{ line: number; message: string }>;
+  partialTrailingLine?: {
+    byteLength: number;
+    sha256: string;
+    base64: string;
+  };
+}>;
+
+export function validateProviderJournalCapture(
+  journal: Record<string, any>,
+  capture: Record<string, any>,
+): {
+  result: "pass";
+  providerRequestCount: number;
+  toolInvocations: Record<string, number>;
+};
+
 export function createQualificationCoverage(): {
   nativeCore: {
     scope: "four-case-only";
@@ -174,9 +198,64 @@ export function buildNativeLaunchArgs(options: {
   proxyUrl: string;
 }): string[];
 
+export function closeServer(
+  server: {
+    close(callback: (error?: Error) => void): void;
+    closeAllConnections?: () => void;
+  },
+  sockets?: Set<{ destroy(): void }>,
+  timeoutMs?: number,
+): Promise<void>;
+
+export function startClassifier(options?: {
+  closeTimeoutMs?: number;
+}): {
+  requests: Array<Record<string, any>>;
+  open(): Promise<string>;
+  close(): Promise<void>;
+};
+
+export function startDestinationProxy(options?: {
+  connectFactory?: (target: {
+    host: string;
+    port: number;
+  }) => {
+    once(event: string, listener: (...args: any[]) => void): unknown;
+    pipe(destination: unknown): unknown;
+    write(value: unknown): unknown;
+    destroy(): void;
+    destroyed: boolean;
+  };
+  closeTimeoutMs?: number;
+}): {
+  destinations: Array<Record<string, any>>;
+  open(): Promise<string>;
+  close(): Promise<void>;
+};
+
 export function terminateOwnedProcessGroup(pid: number): Promise<void>;
 
 export function ownedProcessGroupExists(pid: number): Promise<boolean>;
+
+export function waitForOwnedProcessGroupAbsence(
+  pid: number,
+  timeoutMs?: number,
+): Promise<void>;
+
+export function settleOwnedProcessGroup(
+  processReceipt: Record<string, any>,
+  dependencies?: {
+    groupExists?: (pid: number) => Promise<boolean>;
+    terminateGroup?: (pid: number) => Promise<void>;
+  },
+): Promise<{
+  result: "not-launched" | "pass";
+  pid?: number;
+  processGroupId?: number;
+  presentBeforeCleanup?: boolean;
+  terminationAttempted: boolean;
+  groupAbsent: true;
+}>;
 
 export function waitForOwnedProcessGroup(
   pid: number,

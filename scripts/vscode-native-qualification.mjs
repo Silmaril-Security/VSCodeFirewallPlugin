@@ -39,6 +39,9 @@ const require = createRequire(import.meta.url);
 const { classifyFreshProfileUiFiles } = require(
   "../qa/vscode-native/extension/agent-ui-policy.cjs",
 );
+const { parseProviderJournalBytes } = require(
+  "../qa/vscode-native/extension/provider-journal.cjs",
+);
 const typescript = require("typescript");
 
 export const SAFE_BLOCK_MESSAGE =
@@ -809,12 +812,43 @@ function listen(server) {
   });
 }
 
-async function closeServer(server) {
-  server.closeAllConnections?.();
-  await new Promise((resolve) => server.close(() => resolve()));
+function trackServerSockets(server) {
+  const sockets = new Set();
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  return sockets;
 }
 
-function startClassifier() {
+export async function closeServer(server, sockets = new Set(), timeoutMs = 2_000) {
+  assert.ok(
+    Number.isSafeInteger(timeoutMs) && timeoutMs > 0,
+    "Server close timeout must be a positive integer",
+  );
+  await new Promise((resolve, reject) => {
+    let finished = false;
+    const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      finish(new Error(`Timed out after ${timeoutMs}ms closing owned server`));
+    }, timeoutMs);
+    try {
+      server.close((error) => finish(error));
+      for (const socket of sockets) socket.destroy();
+      server.closeAllConnections?.();
+    } catch (error) {
+      finish(error);
+    }
+  });
+}
+
+export function startClassifier({ closeTimeoutMs = 2_000 } = {}) {
   const requests = [];
   const server = createServer(async (request, response) => {
     try {
@@ -849,13 +883,18 @@ function startClassifier() {
       }));
     }
   });
+  const sockets = trackServerSockets(server);
+  let closePromise;
   return {
     requests,
     async open() {
       const port = await listen(server);
       return `http://127.0.0.1:${port}/classify`;
     },
-    close: () => closeServer(server),
+    close() {
+      closePromise ??= closeServer(server, sockets, closeTimeoutMs);
+      return closePromise;
+    },
   };
 }
 
@@ -868,8 +907,12 @@ function parseAuthority(authority) {
   };
 }
 
-function startDestinationProxy() {
+export function startDestinationProxy({
+  connectFactory = ({ host, port }) => net.connect(port, host),
+  closeTimeoutMs = 2_000,
+} = {}) {
   const destinations = [];
+  let closing = false;
   const server = createServer((request, response) => {
     destinations.push({
       protocol: "http",
@@ -879,6 +922,7 @@ function startDestinationProxy() {
     response.writeHead(403);
     response.end();
   });
+  const sockets = trackServerSockets(server);
   server.on("connect", (request, client, head) => {
     const { host, port } = parseAuthority(request.url ?? "");
     const allowed = host === "api.github.com" && port === 443;
@@ -891,23 +935,47 @@ function startDestinationProxy() {
       client.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       return;
     }
-    const upstream = net.connect(port, host);
+    if (closing) {
+      client.destroy();
+      return;
+    }
+    const upstream = connectFactory({ host, port });
+    sockets.add(upstream);
+    let pairClosed = false;
+    const closePair = () => {
+      if (pairClosed) return;
+      pairClosed = true;
+      sockets.delete(upstream);
+      if (!client.destroyed) client.destroy();
+      if (!upstream.destroyed) upstream.destroy();
+    };
+    client.once("close", closePair);
+    client.once("error", closePair);
+    upstream.once("close", closePair);
+    upstream.once("error", closePair);
     upstream.once("connect", () => {
+      if (closing) {
+        closePair();
+        return;
+      }
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length) upstream.write(head);
       upstream.pipe(client);
       client.pipe(upstream);
     });
-    upstream.once("error", () => client.destroy());
-    client.once("error", () => upstream.destroy());
   });
+  let closePromise;
   return {
     destinations,
     async open() {
       const port = await listen(server);
       return `http://127.0.0.1:${port}`;
     },
-    close: () => closeServer(server),
+    close() {
+      closing = true;
+      closePromise ??= closeServer(server, sockets, closeTimeoutMs);
+      return closePromise;
+    },
   };
 }
 
@@ -938,6 +1006,26 @@ export async function ownedProcessGroupExists(pid) {
   if (result.code === 1) return false;
   throw new Error(
     `Unable to inspect owned process group ${pid}: ${result.stderr.trim()}`,
+  );
+}
+
+export async function waitForOwnedProcessGroupAbsence(pid, timeoutMs = 2_000) {
+  assert.ok(
+    Number.isSafeInteger(pid) && pid > 1,
+    "Owned process-group PID must be a positive integer greater than one",
+  );
+  assert.ok(
+    Number.isSafeInteger(timeoutMs) && timeoutMs > 0,
+    "Owned process-group absence timeout must be a positive integer",
+  );
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (!await ownedProcessGroupExists(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  if (!await ownedProcessGroupExists(pid)) return;
+  throw new Error(
+    `Owned process group ${pid} remained alive after bounded termination`,
   );
 }
 
@@ -1001,6 +1089,62 @@ export async function terminateOwnedProcessGroup(pid) {
     process.kill(-pid, "SIGKILL");
   } catch (error) {
     if (error?.code !== "ESRCH") throw error;
+  }
+  await waitForOwnedProcessGroupAbsence(pid);
+}
+
+export async function settleOwnedProcessGroup(
+  processReceipt,
+  {
+    groupExists = ownedProcessGroupExists,
+    terminateGroup = terminateOwnedProcessGroup,
+  } = {},
+) {
+  const pid = processReceipt?.pid;
+  if (!processReceipt || !Object.hasOwn(processReceipt, "pid")) {
+    return {
+      result: "not-launched",
+      groupAbsent: true,
+      terminationAttempted: false,
+    };
+  }
+  assert.ok(
+    Number.isSafeInteger(pid) && pid > 1,
+    "Recorded owned process-group PID is invalid",
+  );
+  const identity = processReceipt?.processGroupIdentity;
+  assert.deepEqual(
+    identity,
+    { pid, processGroupId: pid },
+    "Recorded process does not have a proven detached owned process-group identity",
+  );
+  const proof = {
+    result: "fail",
+    pid,
+    processGroupId: pid,
+    presentBeforeCleanup: undefined,
+    terminationAttempted: false,
+    groupAbsent: false,
+  };
+  try {
+    proof.presentBeforeCleanup = await groupExists(pid);
+    if (proof.presentBeforeCleanup) {
+      proof.terminationAttempted = true;
+      await terminateGroup(pid);
+    }
+    proof.groupAbsent = !await groupExists(pid);
+    assert.equal(
+      proof.groupAbsent,
+      true,
+      `Owned process group ${pid} is still present after cleanup`,
+    );
+    proof.result = "pass";
+    return proof;
+  } catch (error) {
+    if (error && typeof error === "object") {
+      error.processGroupCleanup = proof;
+    }
+    throw error;
   }
 }
 
@@ -1257,6 +1401,55 @@ async function listEvidence(directory) {
     });
   }
   return evidence;
+}
+
+export async function inspectProviderJournal(filePath) {
+  const bytes = await readFile(filePath);
+  return {
+    path: filePath,
+    sha256: sha256Bytes(bytes),
+    byteLength: bytes.byteLength,
+    ...parseProviderJournalBytes(bytes),
+  };
+}
+
+export function validateProviderJournalCapture(journal, capture) {
+  assert.equal(journal.integrity, "pass", "Provider journal integrity failed");
+  const providerRequests = journal.records
+    .filter((record) => record.type === "provider-request")
+    .map((record) => record.request);
+  assert.deepEqual(
+    providerRequests,
+    capture.providerRequests,
+    "Provider journal does not match the finished provider capture",
+  );
+  const toolInvocations = Object.fromEntries(
+    Object.keys(capture.toolInvocations ?? {}).map((name) => [name, 0]),
+  );
+  for (const record of journal.records) {
+    if (record.type !== "tool-invocation") continue;
+    assert.equal(
+      Object.hasOwn(toolInvocations, record.toolName),
+      true,
+      `Provider journal contains unexpected tool ${record.toolName}`,
+    );
+    assert.equal(
+      record.invocationCount,
+      toolInvocations[record.toolName] + 1,
+      `Provider journal tool count is not contiguous for ${record.toolName}`,
+    );
+    toolInvocations[record.toolName] = record.invocationCount;
+  }
+  assert.deepEqual(
+    toolInvocations,
+    capture.toolInvocations,
+    "Provider journal tool counts do not match the finished provider capture",
+  );
+  return {
+    result: "pass",
+    providerRequestCount: providerRequests.length,
+    toolInvocations,
+  };
 }
 
 function callbackFor(requests, marker, hook = "user_input") {
@@ -1876,6 +2069,10 @@ export async function qualifyNativeVSCode(env = process.env) {
   } = policy.handoffs;
   const evidence = layout.evidence;
   const capturePath = path.join(evidence, "provider-capture.json");
+  const providerJournalPath = path.join(
+    evidence,
+    "provider-tool-journal.ndjson",
+  );
   const extensionInventoryPath = path.join(
     evidence,
     "extension-inventory.json",
@@ -1899,6 +2096,10 @@ export async function qualifyNativeVSCode(env = process.env) {
     outboundDestinations: [],
     classifierRequests: [],
     providerCapture: {},
+    providerJournal: {
+      path: providerJournalPath,
+      result: "not-launched",
+    },
     extensionInventory: {},
     agentEnablement: {
       policy,
@@ -1919,6 +2120,7 @@ export async function qualifyNativeVSCode(env = process.env) {
   let proxy;
   let failure;
   let freshRestore;
+  let nativeLaunchAttempted = false;
   try {
     const preflightHome = path.join(layout.root, "preflight-home");
     await mkdir(preflightHome, { recursive: true, mode: 0o700 });
@@ -2222,6 +2424,7 @@ export async function qualifyNativeVSCode(env = process.env) {
       SILMARIL_LOCAL_EVENT_DIR: evidence,
       SILMARIL_VSCODE_WORKSPACE_STATE: path.join(evidence, "observed-workspaces.json"),
       SILMARIL_NATIVE_CAPTURE_PATH: capturePath,
+      SILMARIL_NATIVE_PROVIDER_JOURNAL_PATH: providerJournalPath,
       SILMARIL_NATIVE_EXTENSION_INVENTORY_PATH: extensionInventoryPath,
       SILMARIL_NATIVE_EXTENSION_INVENTORY_AFTER_ENABLE_PATH:
         extensionInventoryAfterEnablePath,
@@ -2365,6 +2568,7 @@ export async function qualifyNativeVSCode(env = process.env) {
         },
       });
     }
+    nativeLaunchAttempted = true;
     receipt.process = await launchApp({
       executable,
       args: launchArgs,
@@ -2532,14 +2736,103 @@ export async function qualifyNativeVSCode(env = process.env) {
         };
       }
     }
-    const closes = await Promise.allSettled([
-      classifier?.close(),
-      proxy?.close(),
-    ].filter(Boolean));
+    const serverClosers = [
+      ["classifier", classifier?.close.bind(classifier)],
+      ["proxy", proxy?.close.bind(proxy)],
+    ].filter(([, close]) => close);
+    const closes = await Promise.allSettled(
+      serverClosers.map(([, close]) => close()),
+    );
     receipt.ownedServersClosed = closes.every(
       (outcome) => outcome.status === "fulfilled",
     );
-    if (freshRestore) {
+    receipt.serverCleanup = {
+      result: receipt.ownedServersClosed ? "pass" : "fail",
+      servers: closes.map((outcome, index) => ({
+        name: serverClosers[index][0],
+        result: outcome.status,
+        error: outcome.status === "rejected"
+          ? errorReceipt(outcome.reason)
+          : undefined,
+      })),
+    };
+    if (!receipt.ownedServersClosed && !failure) {
+      failure = new Error("One or more owned loopback servers failed to close");
+      receipt.error ??= errorReceipt(failure);
+    }
+
+    const leaderSettled =
+      !nativeLaunchAttempted
+      || Number.isInteger(receipt.process.code)
+      || typeof receipt.process.signal === "string";
+    try {
+      if (
+        nativeLaunchAttempted
+        && !Number.isSafeInteger(receipt.process.pid)
+      ) {
+        throw new Error(
+          "Native launch was attempted without a captured owned process-group PID",
+        );
+      }
+      receipt.processGroupCleanup = await settleOwnedProcessGroup(
+        receipt.process,
+      );
+      receipt.processGroupCleanup.leaderSettled = leaderSettled;
+    } catch (groupCleanupError) {
+      receipt.processGroupCleanup = {
+        ...(groupCleanupError
+          && typeof groupCleanupError === "object"
+          && groupCleanupError.processGroupCleanup
+          ? groupCleanupError.processGroupCleanup
+          : {}),
+        result: "fail",
+        groupAbsent: false,
+        leaderSettled,
+        error: errorReceipt(groupCleanupError),
+      };
+      if (!failure) {
+        failure = groupCleanupError;
+        receipt.error ??= errorReceipt(groupCleanupError);
+      }
+    }
+    receipt.ownedProcessSettled =
+      leaderSettled
+      && receipt.processGroupCleanup.groupAbsent === true;
+
+    if (nativeLaunchAttempted) {
+      try {
+        if (!await pathExists(providerJournalPath)) {
+          throw new Error("Native provider/tool journal was not created");
+        }
+        receipt.providerJournal =
+          await inspectProviderJournal(providerJournalPath);
+        if (receipt.providerJournal.integrity !== "pass") {
+          throw new Error(
+            "Native provider/tool journal failed integrity validation",
+          );
+        }
+        if (receipt.result === "pass") {
+          receipt.providerJournal.finishedCaptureConsistency =
+            validateProviderJournalCapture(
+              receipt.providerJournal,
+              receipt.providerCapture,
+            );
+        }
+      } catch (journalError) {
+        receipt.providerJournal = {
+          ...receipt.providerJournal,
+          path: providerJournalPath,
+          result: "fail",
+          error: errorReceipt(journalError),
+        };
+        if (!failure) {
+          failure = journalError;
+          receipt.error ??= errorReceipt(journalError);
+        }
+      }
+    }
+
+    if (freshRestore && receipt.ownedProcessSettled) {
       let inspectionError;
       let observed;
       let classification;
@@ -2619,12 +2912,14 @@ export async function qualifyNativeVSCode(env = process.env) {
           receipt.error = receipt.freshProfile.restorationError;
         }
       }
+    } else if (freshRestore) {
+      receipt.freshProfile.configurationRestored = false;
+      receipt.freshProfile.uiFileObservation = {
+        checkedAfterOwnedProcessExit: false,
+        restorationSkipped:
+          "Owned process-group absence was not proven; no restoration write was attempted",
+      };
     }
-    const processWasLaunched = Number.isSafeInteger(receipt.process.pid);
-    receipt.ownedProcessSettled =
-      !processWasLaunched
-      || Number.isInteger(receipt.process.code)
-      || typeof receipt.process.signal === "string";
     await writeFinalQualificationReceipt({
       receiptPath,
       receipt,

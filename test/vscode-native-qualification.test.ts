@@ -14,6 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -22,6 +23,7 @@ import {
   buildMinimalChildEnvironment,
   buildNativeLaunchArgs,
   byteReceipt,
+  closeServer,
   collectStrings,
   createQualificationCoverage,
   createFreshQaLayout,
@@ -30,11 +32,16 @@ import {
   inspectAndArchiveFreshUiFiles,
   inspectNativeCjsMissingIdentifiers,
   inspectNormalUiAgentEnablement,
+  inspectProviderJournal,
   inspectSourceContracts,
   ownedProcessGroupExists,
   resolvePortableQaPolicy,
   restoreFreshProfileFiles,
+  settleOwnedProcessGroup,
+  startClassifier,
+  startDestinationProxy,
   terminateOwnedProcessGroup,
+  validateProviderJournalCapture,
   validateQaToolManifest,
   validateSharedCallbackRoutes,
   waitForOwnedProcessGroup,
@@ -83,6 +90,29 @@ const { snapshotNativeState } = require(
     nativeState: Record<string, any> | undefined,
   ): Record<string, any>;
 };
+const {
+  createProviderJournal,
+  parseProviderJournalBytes,
+} = require(
+  "../qa/vscode-native/extension/provider-journal.cjs",
+) as {
+  createProviderJournal(filePath: string): Promise<{
+    append(record: Record<string, any>): Promise<Record<string, any>>;
+    flush(): Promise<void>;
+    close(): Promise<void>;
+  }>;
+  parseProviderJournalBytes(value: Uint8Array): {
+    integrity: "pass" | "fail";
+    validRecordCount: number;
+    records: Array<Record<string, any>>;
+    errors: Array<{ line: number; message: string }>;
+    partialTrailingLine?: {
+      byteLength: number;
+      sha256: string;
+      base64: string;
+    };
+  };
+};
 
 test("native qualification records exact transformed bytes", () => {
   const value = " \ttransformed\r\nprompt β\u0000 ";
@@ -104,6 +134,138 @@ test("native qualification finds poison in nested provider messages", () => {
     }],
   };
   assert.ok(collectStrings(nested).includes("SYNTHETIC_POISON"));
+});
+
+test("provider journal is exclusive, ordered, durable, and retains title requests", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svqa-journal-"));
+  try {
+    const journalPath = path.join(temporary, "provider-tool.ndjson");
+    const journal = await createProviderJournal(journalPath);
+    const titleRequest = {
+      sequence: 1,
+      messages: [{
+        role: "user",
+        content: [{ type: "text", value: "title request synthetic prompt" }],
+      }],
+      tools: [],
+    };
+    await Promise.all([
+      journal.append({
+        type: "provider-request",
+        providerSequence: 1,
+        request: titleRequest,
+      }),
+      journal.append({
+        type: "tool-invocation",
+        toolName: "silmaril_native_qa_posttool_8d724ae7",
+        invocationCount: 1,
+      }),
+    ]);
+    await journal.close();
+
+    const info = await lstat(journalPath);
+    assert.equal(info.isFile(), true);
+    assert.equal(info.mode & 0o777, 0o600);
+    const inspected = await inspectProviderJournal(journalPath);
+    assert.equal(inspected.integrity, "pass");
+    assert.equal(inspected.validRecordCount, 2);
+    assert.deepEqual(
+      inspected.records.map((record) => record.journalSequence),
+      [1, 2],
+    );
+    assert.equal(
+      collectStrings(inspected.records).includes("title request synthetic prompt"),
+      true,
+      "Title-like provider requests must not be filtered from the journal",
+    );
+    assert.deepEqual(
+      validateProviderJournalCapture(inspected, {
+        providerRequests: [titleRequest],
+        toolInvocations: {
+          silmaril_native_qa_preblock_8d724ae7: 0,
+          silmaril_native_qa_posttool_8d724ae7: 1,
+        },
+      }),
+      {
+        result: "pass",
+        providerRequestCount: 1,
+        toolInvocations: {
+          silmaril_native_qa_preblock_8d724ae7: 0,
+          silmaril_native_qa_posttool_8d724ae7: 1,
+        },
+      },
+    );
+    await assert.rejects(
+      createProviderJournal(journalPath),
+      (error: NodeJS.ErrnoException) => error.code === "EEXIST",
+    );
+
+    const externalPath = path.join(temporary, "external.ndjson");
+    const symlinkPath = path.join(temporary, "journal-link.ndjson");
+    await writeFile(externalPath, "external\n", { mode: 0o600 });
+    await symlink(externalPath, symlinkPath);
+    await assert.rejects(
+      createProviderJournal(symlinkPath),
+      (error: NodeJS.ErrnoException) =>
+        error.code === "EEXIST" || error.code === "ELOOP",
+    );
+    assert.equal(await readFile(externalPath, "utf8"), "external\n");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("provider journal preserves complete rows and fails a torn trailing row", () => {
+  const complete = Buffer.from(`${JSON.stringify({
+    type: "provider-request",
+    providerSequence: 1,
+    request: { sequence: 1, messages: [] },
+    schemaVersion: 1,
+    journalSequence: 1,
+    state: "in-progress",
+    completion: "not-finished",
+  })}\n`, "utf8");
+  const torn = Buffer.from('{"type":"tool-invocation"', "utf8");
+  const parsed = parseProviderJournalBytes(Buffer.concat([complete, torn]));
+  assert.equal(parsed.integrity, "fail");
+  assert.equal(parsed.validRecordCount, 1);
+  assert.equal(parsed.records[0]?.type, "provider-request");
+  assert.equal(parsed.partialTrailingLine?.byteLength, torn.byteLength);
+  assert.equal(
+    Buffer.from(parsed.partialTrailingLine?.base64 ?? "", "base64").equals(torn),
+    true,
+  );
+  const splitUtf8 = Buffer.from([0x7b, 0x22, 0xce]);
+  const split = parseProviderJournalBytes(Buffer.concat([complete, splitUtf8]));
+  assert.equal(split.integrity, "fail");
+  assert.equal(split.validRecordCount, 1);
+  assert.deepEqual(
+    Buffer.from(split.partialTrailingLine!.base64, "base64"),
+    splitUtf8,
+    "A torn multibyte character must retain its original bytes",
+  );
+  const invalidUtf8 = Buffer.from(complete);
+  invalidUtf8[invalidUtf8.indexOf(Buffer.from("provider-request"))] = 0xff;
+  assert.equal(parseProviderJournalBytes(invalidUtf8).integrity, "fail");
+});
+
+test("QA extension durably journals observations before progress or tool effects", async () => {
+  const extensionSource = await readFile(new URL(
+    "../qa/vscode-native/extension/extension.cjs",
+    import.meta.url,
+  ), "utf8");
+  assert.match(
+    extensionSource,
+    /state\.providerRequests\.push\(providerRequest\);\s+await journal\.append\(\{[\s\S]*type: "provider-request"[\s\S]*\}\);\s+\n\s+if \(tool/u,
+  );
+  assert.match(
+    extensionSource,
+    /state\.toolInvocations\[PRE_TOOL\] \+= 1;\s+await journal\.append\(\{[\s\S]*toolName: PRE_TOOL[\s\S]*\}\);\s+const markerPath/u,
+  );
+  assert.match(
+    extensionSource,
+    /state\.toolInvocations\[POST_TOOL\] \+= 1;\s+await journal\.append\(\{[\s\S]*toolName: POST_TOOL[\s\S]*\}\);\s+return new vscode\.LanguageModelToolResult/u,
+  );
 });
 
 type SharedRouteRow = {
@@ -1394,4 +1556,282 @@ test("cleanup stops only the exact owned detached process group", async () => {
       if (testError === undefined) throw cleanupError;
     }
   }
+});
+
+test("incremental journal survives bounded termination of a hanging non-GUI child", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svqa-journal-child-"));
+  const journalPath = path.join(temporary, "provider-tool.ndjson");
+  const readyPath = path.join(temporary, "ready");
+  const capturePath = path.join(temporary, "provider-capture.json");
+  const helperPath = fileURLToPath(new URL(
+    "../qa/vscode-native/extension/provider-journal.cjs",
+    import.meta.url,
+  ));
+  let child: ReturnType<typeof spawn> | undefined;
+  let closed: Promise<unknown[]> | undefined;
+  try {
+    child = spawn(process.execPath, [
+      "-e",
+      [
+        "const fs = require('node:fs');",
+        "const { createProviderJournal } = require(process.argv[1]);",
+        "(async () => {",
+        "  const journal = await createProviderJournal(process.argv[2]);",
+        "  await journal.append({",
+        "    type: 'provider-request',",
+        "    providerSequence: 1,",
+        "    request: { sequence: 1, messages: [{ content: 'synthetic title' }] },",
+        "  });",
+        "  await journal.append({",
+        "    type: 'tool-invocation',",
+        "    toolName: 'silmaril_native_qa_posttool_8d724ae7',",
+        "    invocationCount: 1,",
+        "  });",
+        "  fs.writeFileSync(process.argv[3], 'ready\\n', { mode: 0o600 });",
+        "  setInterval(() => {}, 1_000);",
+        "})().catch((error) => { console.error(error); process.exit(1); });",
+      ].join("\n"),
+      helperPath,
+      journalPath,
+      readyPath,
+    ], {
+      detached: true,
+      stdio: "ignore",
+    });
+    await once(child, "spawn");
+    const identity = await waitForOwnedProcessGroup(child.pid!);
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      if (await readFile(readyPath, "utf8").then(
+        () => true,
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        },
+      )) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(await readFile(readyPath, "utf8"), "ready\n");
+    closed = once(child, "close");
+    await terminateOwnedProcessGroup(identity.pid);
+    await closed;
+
+    const journal = await inspectProviderJournal(journalPath);
+    assert.equal(journal.integrity, "pass");
+    assert.equal(journal.validRecordCount, 2);
+    assert.ok(journal.records.every((record) =>
+      record.state === "in-progress"
+      && record.completion === "not-finished"));
+    await assert.rejects(
+      readFile(capturePath),
+      (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+      "Incremental records must not fabricate a finished suite capture",
+    );
+  } finally {
+    if (
+      child?.pid
+      && await ownedProcessGroupExists(child.pid).catch(() => false)
+    ) {
+      await terminateOwnedProcessGroup(child.pid);
+      closed ??= once(child, "close");
+      await closed;
+    }
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("owned helper outliving its leader is removed before restoration", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svqa-group-"));
+  const helperReadyPath = path.join(temporary, "helper-ready");
+  let leader: ReturnType<typeof spawn> | undefined;
+  try {
+    leader = spawn(process.execPath, [
+      "-e",
+      [
+        "const fs = require('node:fs');",
+        "const { spawn } = require('node:child_process');",
+        "const helper = spawn(process.execPath, [",
+        "  '-e',",
+        "  'process.on(\"SIGTERM\", () => {}); setInterval(() => {}, 1000)',",
+        "], { stdio: 'ignore' });",
+        "fs.writeFileSync(process.argv[1], String(helper.pid), { mode: 0o600 });",
+        "setTimeout(() => process.exit(0), 300);",
+      ].join("\n"),
+      helperReadyPath,
+    ], {
+      detached: true,
+      stdio: "ignore",
+    });
+    await once(leader, "spawn");
+    const leaderClosed = once(leader, "close");
+    const identity = await waitForOwnedProcessGroup(leader.pid!);
+    await leaderClosed;
+    assert.equal(await ownedProcessGroupExists(identity.pid), true);
+
+    const cleanup = await settleOwnedProcessGroup({
+      pid: identity.pid,
+      processGroupIdentity: identity,
+      code: 0,
+    });
+    assert.equal(cleanup.presentBeforeCleanup, true);
+    assert.equal(cleanup.terminationAttempted, true);
+    assert.equal(cleanup.groupAbsent, true);
+
+    const profileRoot = path.join(temporary, "profile");
+    await mkdir(profileRoot, { mode: 0o700 });
+    const settingsPath = path.join(profileRoot, "settings.json");
+    const configPath = path.join(profileRoot, "config.json");
+    const workspacePath = path.join(profileRoot, "native.code-workspace");
+    await Promise.all([
+      writeFile(settingsPath, "changed-settings", { mode: 0o600 }),
+      writeFile(configPath, "changed-config", { mode: 0o600 }),
+      writeFile(workspacePath, "changed-workspace", { mode: 0o600 }),
+    ]);
+    const restoration = await restoreFreshProfileFiles({
+      ownedProfileRoot: profileRoot,
+      settingsPath,
+      settingsBytes: Buffer.from("original-settings"),
+      configPath,
+      configBytes: Buffer.from("original-config"),
+      workspaceFilePath: workspacePath,
+      workspaceFileBytes: Buffer.from("original-workspace"),
+    });
+    assert.equal(restoration.byteExact, true);
+  } finally {
+    if (
+      leader?.pid
+      && await ownedProcessGroupExists(leader.pid).catch(() => false)
+    ) {
+      await terminateOwnedProcessGroup(leader.pid);
+    }
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("group inspection or termination uncertainty rejects cleanup", async () => {
+  for (const pid of [null, undefined, "42", 0, 1, 1.5]) {
+    await assert.rejects(
+      settleOwnedProcessGroup({ pid } as any),
+      /Recorded owned process-group PID is invalid/u,
+    );
+  }
+  const receipt = {
+    pid: 42,
+    processGroupIdentity: { pid: 42, processGroupId: 42 },
+    code: 0,
+  };
+  await assert.rejects(
+    settleOwnedProcessGroup(receipt, {
+      groupExists: async () => {
+        throw new Error("synthetic group inspection failure");
+      },
+    }),
+    /synthetic group inspection failure/u,
+  );
+  await assert.rejects(
+    settleOwnedProcessGroup(receipt, {
+      groupExists: async () => true,
+      terminateGroup: async () => {
+        throw new Error("synthetic group termination failure");
+      },
+    }),
+    (error: Error & { processGroupCleanup?: Record<string, any> }) => {
+      assert.match(error.message, /synthetic group termination failure/u);
+      assert.equal(
+        error.processGroupCleanup?.terminationAttempted,
+        true,
+      );
+      assert.equal(error.processGroupCleanup?.groupAbsent, false);
+      return true;
+    },
+  );
+  const launcher = await readFile(new URL(
+    "../scripts/vscode-native-qualification.mjs",
+    import.meta.url,
+  ), "utf8");
+  assert.ok(
+    launcher.indexOf("receipt.processGroupCleanup = await settleOwnedProcessGroup(")
+      < launcher.indexOf("if (freshRestore && receipt.ownedProcessSettled)"),
+  );
+  assert.match(
+    launcher,
+    /else if \(freshRestore\) \{[\s\S]*restorationSkipped:/u,
+    "Unproven group absence must skip restoration writes",
+  );
+});
+
+test("loopback CONNECT and classifier sockets close through the bounded cleanup", async () => {
+  let upstreamSocket: net.Socket | undefined;
+  const upstreamServer = net.createServer((socket) => {
+    upstreamSocket = socket;
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstreamServer.once("error", reject);
+    upstreamServer.listen(0, "127.0.0.1", () => resolve());
+  });
+  const upstreamAddress = upstreamServer.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === "object");
+
+  const proxy = startDestinationProxy({
+    connectFactory({ host, port }) {
+      assert.deepEqual({ host, port }, { host: "api.github.com", port: 443 });
+      return net.connect(upstreamAddress.port, "127.0.0.1");
+    },
+  });
+  const proxyUrl = new URL(await proxy.open());
+  const client = net.connect(Number(proxyUrl.port), "127.0.0.1");
+  await once(client, "connect");
+  client.write(
+    "CONNECT api.github.com:443 HTTP/1.1\r\n"
+      + "Host: api.github.com:443\r\n\r\n",
+  );
+  const [response] = await once(client, "data") as [Buffer];
+  assert.match(response.toString("utf8"), /200 Connection Established/u);
+  assert.ok(upstreamSocket && !upstreamSocket.destroyed);
+  client.on("error", () => {});
+  upstreamSocket.on("error", () => {});
+  const clientClosed = new Promise<void>((resolve) => {
+    client.once("close", () => resolve());
+  });
+  const upstreamClosed = new Promise<void>((resolve) => {
+    upstreamSocket!.once("close", () => resolve());
+  });
+  await proxy.close();
+  await Promise.all([clientClosed, upstreamClosed]);
+  assert.equal(client.destroyed, true);
+  assert.equal(upstreamSocket.destroyed, true);
+  await new Promise<void>((resolve, reject) => {
+    upstreamServer.close((error) => error ? reject(error) : resolve());
+  });
+
+  const classifier = startClassifier();
+  const classifierUrl = new URL(await classifier.open());
+  const incompleteClient = net.connect(
+    Number(classifierUrl.port),
+    "127.0.0.1",
+  );
+  await once(incompleteClient, "connect");
+  incompleteClient.on("error", () => {});
+  incompleteClient.write(
+    "POST /classify HTTP/1.1\r\n"
+      + "Host: 127.0.0.1\r\nContent-Length: 100\r\n\r\n{}",
+  );
+  const incompleteClosed = new Promise<void>((resolve) => {
+    incompleteClient.once("close", () => resolve());
+  });
+  await classifier.close();
+  await incompleteClosed;
+  assert.equal(incompleteClient.destroyed, true);
+});
+
+test("owned server close rejects when its callback never settles", async () => {
+  const started = Date.now();
+  await assert.rejects(
+    closeServer({
+      close() {},
+      closeAllConnections() {},
+    }, new Set(), 30),
+    /Timed out after 30ms/u,
+  );
+  assert.ok(Date.now() - started < 1_000);
 });
