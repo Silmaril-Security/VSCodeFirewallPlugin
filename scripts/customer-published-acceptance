@@ -116,7 +116,7 @@ def run(checks):
     checks["artifact_integrity"] = "PASS"
     owner = os.environ.get("CUSTOMER_MANAGED_OWNER", "")
     require(owner in ("", "SilmarilMacOS"), "Unknown managed owner")
-    with physical_lease(), tempfile.TemporaryDirectory(prefix="vscode-customer-") as temp:
+    with physical_lease(), tempfile.TemporaryDirectory(prefix="sv-", dir="/private/tmp") as temp:
         private = Path(temp).resolve()
         home = private / "home"
         home.mkdir(mode=0o700)

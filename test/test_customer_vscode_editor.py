@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import customer_vscode_editor as driver
@@ -59,3 +60,24 @@ class EditorObservationTests(unittest.TestCase):
             self.assertEqual(driver.denial_observed(rows, leaked, scenario=name, **args), "FAIL")
             self.assertEqual(driver.denial_observed([prompt_row, {**expected, "policyDecision": "allow"}],
                                                     transcript, scenario=name, **args), "BLOCKED")
+
+
+    def test_group_cleanup_kills_lingering_helpers_after_leader_exit(self):
+        proc = Mock(pid=1111)
+        proc.poll.return_value = 0
+        calls = []
+        def signal_group(pid, sig):
+            self.assertEqual(pid, proc.pid)
+            calls.append(sig)
+            if sig == 0 and driver.signal.SIGKILL in calls:
+                raise ProcessLookupError()
+        with patch.object(driver.os, "killpg", side_effect=signal_group):
+            driver.stop_editor_group(proc, term_timeout=0, kill_timeout=1)
+        self.assertEqual(calls, [driver.signal.SIGTERM, 0, driver.signal.SIGKILL, 0])
+        proc.wait.assert_called_once()
+
+    def test_socket_budget_is_validated_before_launch(self):
+        profile = Path("/private/tmp") / ("x" * 100)
+        with self.assertRaisesRegex(driver.PhysicalHostUnavailable, "socket path"):
+            with driver.launch(None, None, profile, None, {}):
+                self.fail("oversized socket should prevent launching the editor")

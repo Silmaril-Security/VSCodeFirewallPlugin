@@ -172,8 +172,28 @@ def valid_evidence(events, *, prompt, marker, version, managed):
     return {"pre_tool", "tool_result"}.issubset(reads)
 
 
+def stop_editor_group(proc, term_timeout=10, kill_timeout=5):
+    # The owned group can still contain helpers after its leader exits.
+    for sig, timeout in ((signal.SIGTERM, term_timeout), (signal.SIGKILL, kill_timeout)):
+        try:
+            os.killpg(proc.pid, sig)
+            deadline = time.monotonic() + timeout
+            while True:
+                proc.poll()  # reap our child so it cannot keep the group visible as a zombie
+                os.killpg(proc.pid, 0)
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+        except ProcessLookupError:
+            proc.wait(timeout=kill_timeout)
+            return
+    raise ValueError("An owned editor process remained after group termination")
+
+
 @contextlib.contextmanager
 def launch(binary, cli, profile, workspace, env):
+    prerequisite(len(os.fsencode(profile / "1.14-main.sock")) <= 103,
+                 "The private editor socket path exceeds the macOS byte limit")
     flags = [f"--user-data-dir={profile}", f"--extensions-dir={profile.parent / 'qa-extensions'}"]
     proc = subprocess.Popen([binary, *flags, "--new-window", "--skip-welcome", "--skip-release-notes",
                              "--log", "trace", workspace], env=env, cwd=workspace, start_new_session=True,
@@ -190,14 +210,7 @@ def launch(binary, cli, profile, workspace, env):
             raise PhysicalHostUnavailable("The signed editor did not open an Aqua window")
         yield lambda prompt: run(cli, "chat", "--reuse-window", "--mode", "agent", prompt, env=env, cwd=workspace)
     finally:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=5)
-        except ProcessLookupError:
-            pass
+        stop_editor_group(proc)
 
 
 def verify_managed_endpoint(url, key):
