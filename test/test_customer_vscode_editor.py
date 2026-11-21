@@ -1,4 +1,7 @@
+from contextlib import redirect_stderr
 import hashlib
+import io
+import subprocess
 import json
 from pathlib import Path
 import sys
@@ -11,6 +14,20 @@ import customer_vscode_editor as driver
 
 
 class EditorObservationTests(unittest.TestCase):
+
+    def test_editor_command_failure_reports_only_the_known_operation(self):
+        for executable, label in (("/usr/bin/codesign", "editor signature verification"),
+                                  ("/private/qa/secret-path", "editor command")):
+            with self.subTest(executable=executable):
+                failure = subprocess.CalledProcessError(1, [executable, "private-argument"],
+                                                       stderr=b"private diagnostic")
+                log = io.StringIO()
+                with patch.object(driver, "journey", side_effect=failure), redirect_stderr(log):
+                    checks = driver.run_editor_checks(None, None, True, "0.2.4")
+                self.assertEqual(checks["native"], "FAIL")
+                self.assertEqual(checks["live"], "BLOCKED")
+                self.assertEqual(log.getvalue(), f"Editor acceptance failed during {label} (exit 1)\n")
+
     def test_rendered_route_and_fresh_time_are_required(self):
         with tempfile.TemporaryDirectory() as temp:
             profile = Path(temp).resolve()
