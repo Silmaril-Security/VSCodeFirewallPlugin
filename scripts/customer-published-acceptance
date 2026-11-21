@@ -137,7 +137,7 @@ def run(checks):
 
 def main():
     result = Path(os.environ["CUSTOMER_RESULT"])
-    checks = dict.fromkeys(("install", "native", "live"), "BLOCKED")
+    checks = dict.fromkeys(("install", "native", "live", "policy_denial", "prompt_denial", "pre_tool_denial", "post_tool_denial"), "BLOCKED")
     try:
         run(checks)
     except PhysicalHostUnavailable as exc:

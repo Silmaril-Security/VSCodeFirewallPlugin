@@ -22,6 +22,10 @@ ROUTE = "agent-host-copilotcli"
 EVIDENCE = Path("Library/Application Support/Silmaril/Evidence/incoming")
 DATA = Path("Library/Application Support/Code")
 GUARD = Path("/Users/Shared/silmaril-release-qa/vscode-qa-identity.json")
+DENIALS = {"prompt_denial": ("user_input", "content_replaced"),
+           "pre_tool_denial": ("pre_tool", "block_returned"),
+           "post_tool_denial": ("tool_result", "content_replaced")}
+BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content."
 VERSIONS = {True: "1.145.3", False: "1.145.2"}
 
 
@@ -136,11 +140,16 @@ def renderer_state(data, since):
     if len(rows) > 1:
         raise ValueError("Expected exactly one completed QA chat turn")
     if not rows:
-        return False
+        return None
     row, path = rows[0]
     if row.get("sessionType") != ROUTE or not str(row.get("chatSessionId", "")).startswith(ROUTE + ":/"):
         raise ValueError("Chat executed in the wrong VS Code session type")
-    return path in resources
+    return row["chatSessionId"].split(":/", 1)[1].strip("/") if path in resources else None
+
+
+def read_tool(event):
+    name = (event.get("toolDisplayName") or "").replace("_", "").replace(" ", "").lower()
+    return name in {"read", "readfile", "view"}
 
 
 def valid_evidence(events, *, prompt, marker, version, managed):
@@ -158,7 +167,7 @@ def valid_evidence(events, *, prompt, marker, version, managed):
     for event in matching:
         if (event.get("mode"), event.get("prediction"), event.get("policyDecision"), event.get("nativeAction")) != ("block", "benign", "allow", "allowed"):
             raise ValueError("The firewall did not allow the benign editor journey")
-    reads = {e.get("hook") for e in matching if "read" in (e.get("toolDisplayName") or "").lower()}
+    reads = {e.get("hook") for e in matching if read_tool(e)}
     return {"pre_tool", "tool_result"}.issubset(reads)
 
 
@@ -215,46 +224,152 @@ def journey(home, plugin, managed, version, checks):
            "SILMARIL_CONFIG_PATH": str(config)}
     if managed:
         env.update(SILMARIL_API_URL=url, SILMARIL_API_KEY=key, SILMARIL_MODE="block")
-    marker = "silmaril-runtime-check:" + secrets.token_hex(16)
-    note = workspace / ("qa-read-" + secrets.token_hex(10) + ".txt")
-    prompt = f"{marker}. Use the read tool to read {note.name}. Reply with the word it contains."
     spool_dirs = {home / EVIDENCE}
     if managed:
-        # Foundation may resolve Application Support from the standard QA login instead of HOME.
+        # Foundation can select the dedicated QA login's Application Support directory.
         spool_dirs.add(account_home / EVIDENCE)
     pattern = "runtime-*.json" if managed else "event-*.json"
-    baseline = {p for spool in spool_dirs for p in spool.glob(pattern)}
-    with note.open("x", opener=lambda name, flags: os.open(name, flags, 0o600)) as f:
-        f.write("sunflower\n")
-    try:
-        with launch(binary, cli, profile, workspace, env) as submit:
-            since = time.time() * 1000
-            submit(prompt)
-            deadline = time.monotonic() + 210
-            while time.monotonic() < deadline:
-                observed = []
-                for directory in spool_dirs:
-                    for path in directory.glob(pattern):
-                        if path not in baseline and path.is_file() and path.resolve() == path:
-                            observed.append(read_json(path))
-                routed = renderer_state(profile, since)
-                allowed = valid_evidence(observed, prompt=prompt, marker=marker, version=version, managed=managed)
-                if allowed:
-                    checks["install"] = "PASS"
-                    checks["live"] = "PASS"
-                if routed and allowed:
-                    checks["native"] = "PASS"
+    # The signed Copilot Agent Host stores its normal session history under COPILOT_HOME/session-state.
+    copilot = home / ".copilot"
+    env["COPILOT_HOME"] = str(copilot)
+    with launch(binary, cli, profile, workspace, env) as submit:
+        for scenario in ("allow", *DENIALS):
+            try:
+                outcome = run_case(scenario, workspace, profile, copilot, spool_dirs, pattern,
+                                   submit, managed, version)
+            except PhysicalHostUnavailable as exc:
+                print(str(exc), file=sys.stderr)
+                outcome = "BLOCKED"
+            except ValueError as exc:
+                print(f"{scenario}: {exc}", file=sys.stderr)
+                outcome = "FAIL"
+            if scenario == "allow":
+                checks["native"] = outcome
+                checks["live"] = outcome
+                if outcome != "PASS":
                     return
-                time.sleep(1)
+                checks["install"] = "PASS"
+            else:
+                checks[scenario] = outcome
+        observed = [checks[scenario] for scenario in DENIALS]
+        checks["policy_denial"] = ("FAIL" if "FAIL" in observed else
+                                   "PASS" if all(s == "PASS" for s in observed) else "BLOCKED")
+
+
+def session_history(copilot, session, offsets):
+    # Only the scoped QA session's ordinary appended public client history is inspected.
+    # No logging of text, no provider/network observer and no reading previous turns.
+    if not session or "/" in session or session in {".", ".."}:
+        return []
+    path = copilot / "session-state" / session / "events.jsonl"
+    if not path.is_file() or path.resolve() != path:
+        return []
+    with path.open("rb") as f:
+        f.seek(offsets.get(path, 0))
+        data = f.read(4 * 1024 * 1024 + 1)
+    if len(data) > 4 * 1024 * 1024:
+        raise PhysicalHostUnavailable("The bounded QA session-history observer could not read this turn")
+    rows = []
+    for line in data.splitlines():
+        try:
+            row = json.loads(line)
+            if isinstance(row, dict) and isinstance(row.get("data"), dict):
+                rows.append(row)
+        except ValueError:
+            continue  # the Agent Host may still be appending its final event
+    return rows
+
+
+def denial_observed(events, history, *, scenario, prompt, marker, version, managed, word):
+    boundary, action = DENIALS[scenario]
+    producer = "SilmarilHookRuntime" if managed else "VSCodeFirewallPlugin"
+    expected = hashlib.sha256((prompt if managed else marker).encode()).hexdigest()
+    eligible = [e for e in events if e.get("schemaVersion") == 1 and e.get("host") == "vscode"
+                and e.get("mode") == "block" and e.get("provenance", {}).get("producer") == producer
+                and e.get("provenance", {}).get("pluginVersion") == version]
+    sessions = {e["sessionFingerprint"] for e in eligible if e.get("sessionFingerprint")
+                and e.get("hook") == "user_input" and e.get("requestFingerprint") == expected}
+    rows = [e for e in eligible if e.get("sessionFingerprint") in sessions and e.get("hook") == boundary
+            and (boundary == "user_input" or read_tool(e))]
+    if len(sessions) != 1 or not rows:
+        return None
+    blocked = [e for e in rows if e.get("policyDecision") == "block"]
+    if not blocked:
+        return "BLOCKED"
+    if not all(e.get("nativeAction") == action for e in blocked):
+        return "FAIL"
+    messages = [r["data"].get("content") for r in history if r["type"] == "assistant.message"
+                and not r["data"].get("toolRequests") and isinstance(r["data"].get("content"), str)]
+    if not messages:
+        return None
+    response = messages[-1]
+    if word in response:
+        return "FAIL"
+    if scenario == "prompt_denial":
+        # The shared hook replaces the submitted prompt. The signed client's ordinary user
+        # message must record that replacement without issuing the requested file read.
+        if any(r["type"] == "tool.execution_start" for r in history):
+            return "FAIL"
+        replaced = any(r["type"] == "user.message" and r["data"].get("content") == BLOCK_MESSAGE for r in history)
+        return "PASS" if replaced else None
+    # The installed hook and the client must both report the standard denial. The
+    # benign prompt asks the model to quote the reason but never supplies that wording.
+    return "PASS" if BLOCK_MESSAGE in response else None
+
+
+def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit, managed, version):
+    marker = "silmaril-runtime-check:" + secrets.token_hex(16)
+    filename = f"qa-{scenario}-{secrets.token_hex(10)}.txt"
+    note = workspace / filename
+    word = secrets.token_hex(16)
+    name = scenario.replace("_", "-")
+    prompt_tag = " RELEASE-QA-PROMPT-DENY." if scenario == "prompt_denial" else ""
+    if scenario == "pre_tool_denial":
+        note = workspace / ("RELEASE-QA-READ-DENY-" + filename)
+    content = ("RELEASE-QA-RESULT-DENY " if scenario == "post_tool_denial" else "") + word
+    prompt = (f"{marker}.{prompt_tag} Read the note {note.name} using the read tool. "
+              "Reply with its contents. If the read is denied or the result is replaced, "
+              "stop and quote the displayed reason verbatim.")
+    previous = {p for spool in spool_dirs for p in spool.glob(pattern)}
+    offsets = {p: p.stat().st_size for p in (copilot / "session-state").glob("*/events.jsonl")
+               if p.is_file() and p.resolve() == p}
+    with note.open("x", opener=lambda filename, flags: os.open(filename, flags, 0o600)) as f:
+        f.write(content + "\n")
+    try:
+        since = time.time() * 1000
+        submit(prompt)
+        deadline = time.monotonic() + 210
+        routed = None
+        allowed = False
+        while time.monotonic() < deadline:
+            evidence = [read_json(p) for d in spool_dirs for p in d.glob(pattern)
+                        if p not in previous and p.is_file() and p.resolve() == p]
+            routed = renderer_state(profile, since)
             if routed:
-                raise ValueError("Signed editor completed but the installed plugin did not classify all three Read boundaries")
-            raise PhysicalHostUnavailable("No completed shared editor turn. Check the QA model entitlement, session selection and normal workspace trust")
+                history = session_history(copilot, routed, offsets)
+                if scenario == "allow":
+                    allowed = valid_evidence(evidence, prompt=prompt, marker=marker, version=version, managed=managed)
+                    # Verify final customer-visible readback against a value absent from the prompt.
+                    if allowed and any(r["type"] == "assistant.message" and not r["data"].get("toolRequests")
+                                       and word in str(r["data"].get("content", "")) for r in history):
+                        return "PASS"
+                else:
+                    result = denial_observed(evidence, history, scenario=scenario, prompt=prompt, marker=marker,
+                                             version=version, managed=managed, word=word)
+                    if result in ("PASS", "FAIL"):
+                        return result
+                    if result == "BLOCKED" and history:
+                        raise PhysicalHostUnavailable(f"{name}: Test Tenant did not supply the controlled policy denial")
+            time.sleep(1)
+        if routed and scenario == "allow" and not allowed:
+            raise ValueError("Signed editor completed but its plugin did not observe the permitted read")
+        raise PhysicalHostUnavailable(f"{name}: shared turn, signed-client reply or required native effect unobserved")
     finally:
         note.unlink(missing_ok=True)
 
 
 def run_editor_checks(home, plugin, managed, version):
-    checks = dict.fromkeys(("install", "native", "live"), "BLOCKED")
+    checks = dict.fromkeys(("install", "native", "live", "policy_denial", *DENIALS), "BLOCKED")
     try:
         journey(home, plugin, managed, version, checks)
     except PhysicalHostUnavailable as exc:

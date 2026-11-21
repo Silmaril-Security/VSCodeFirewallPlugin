@@ -37,3 +37,25 @@ class EditorObservationTests(unittest.TestCase):
         self.assertFalse(driver.valid_evidence([event, pre, post], **{**args, "version": "0.2.4"}))
         with self.assertRaises(ValueError):
             driver.valid_evidence([event, pre, {**post, "prediction": "malicious"}], **args)
+
+    def test_denial_requires_product_action_and_matching_signed_client_outcome(self):
+        prompt, nonce, word = "benign-policy-turn", "marker", "unprompted-word"
+        args = dict(prompt=prompt, marker=nonce, version="0.3.1", managed=True, word=word)
+        metadata = dict(schemaVersion=1, host="vscode", mode="block", sessionFingerprint="abc",
+                        provenance=dict(producer="SilmarilHookRuntime", pluginVersion="0.3.1"))
+        prompt_row = dict(**metadata, hook="user_input", requestFingerprint=hashlib.sha256(prompt.encode()).hexdigest())
+        reply = {"type": "assistant.message", "data": {"content": driver.BLOCK_MESSAGE}}
+        for name, (hook, action) in driver.DENIALS.items():
+            expected = {**metadata, "hook": hook, "toolDisplayName": "read_file", "policyDecision": "block",
+                        "nativeAction": action}
+            transcript = [reply]
+            if name == "prompt_denial":
+                expected.update(requestFingerprint=prompt_row["requestFingerprint"])
+                transcript = [{"type": "user.message", "data": {"content": driver.BLOCK_MESSAGE}}, reply]
+            rows = [prompt_row, expected]
+            self.assertEqual(driver.denial_observed(rows, transcript, scenario=name, **args), "PASS")
+            self.assertIsNone(driver.denial_observed(rows, [], scenario=name, **args))
+            leaked = [*transcript, {"type": "assistant.message", "data": {"content": word}}]
+            self.assertEqual(driver.denial_observed(rows, leaked, scenario=name, **args), "FAIL")
+            self.assertEqual(driver.denial_observed([prompt_row, {**expected, "policyDecision": "allow"}],
+                                                    transcript, scenario=name, **args), "BLOCKED")
