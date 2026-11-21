@@ -3166,3 +3166,24 @@ test("owned server close rejects when its callback never settles", async () => {
   );
   assert.ok(Date.now() - started < 1_000);
 });
+
+test("the benign diagnostic accepts only current, unique, session-bound renderer identity", () => {
+  const { rendererWrappedModel } = require("../qa/vscode-native/extension/shared-route-policy.cjs");
+  const vendor = "agent-host-copilotcli";
+  const id = "dummy/model";
+  const row = {
+    identifier: `${vendor}:${id}`,
+    metadata: { vendor, id, name: "Dummy model", version: "1", family: id,
+      targetChatSessionType: vendor, byokModelIdentifier: id, isUserSelectable: true },
+  };
+  const prefix = `2026-11-10 15:45:00.001 [trace] [LM] Resolved language models for vendor ${vendor} `;
+  const log = (data: unknown) => ({ relativePath: "window1/renderer.log", text: prefix + JSON.stringify(data) });
+  assert.deepEqual(rendererWrappedModel([log([row])], id), {
+    source: "fresh-renderer-registry", vendor, id, name: "Dummy model",
+    family: id, version: "1", logFile: "window1/renderer.log",
+  });
+  assert.equal(rendererWrappedModel([{ ...log([row]), text: log([row]).text + "\n" + log([]).text }], id), undefined);
+  assert.throws(() => rendererWrappedModel([log([row, row])], id));
+  assert.throws(() => rendererWrappedModel([log([row]), log([row])], id));
+  assert.throws(() => rendererWrappedModel([log([{ ...row, metadata: { ...row.metadata, byokModelIdentifier: "other" } }])], id));
+});

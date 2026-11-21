@@ -262,6 +262,24 @@ export NATIVE_SHARED_MODEL_PENDING_PATH="$QA_ROOT/handoffs/shared-model.json"
 # Then run the reviewed human command above with these two exports present.
 ```
 
+### Benign shared-model diagnostic
+
+Set `SILMARIL_NATIVE_BENIGN_DIAGNOSTIC=1` alongside the two shared-route exports
+above. Run the portable preflight command first, using an unused private
+root. For a GUI run, use a second fresh root and the four normal visible UI
+handoffs. Record `normal-visible-ui` as the session picker's observation
+source only after observing it. The signed app, in-memory secret storage,
+network restrictions, and cleanup checks apply to this mode.
+
+The diagnostic checks the exact wrapped model in the fresh renderer registry
+and asks the operator to select it in the normal picker. It then sends one
+unique harmless acknowledgement request to the selected chat. The launcher
+checks the single completed shared-session turn in that same renderer,
+correlates the request with the registered dummy provider's journal, and
+checks zero tool invocations. A completed diagnostic records
+`diagnostic-observed`. Native core stays `not-run` and release qualification
+stays `incomplete`.
+
 The fresh private application settings include
 `chat.agentHost.experimental.titleGeneration=activeAgent` only for this
 opt-in. The exact signed source guard requires its stable default `utility`,
