@@ -212,7 +212,7 @@ does not record a native pass, does not establish a supported floor, and does
 not change the incomplete release/Warn/Shadow/batch-resume status. Add both
 the route opt-in and a fourth contained handoff:
 
-Current status: native004 and native005 both failed setup before any model
+Earlier attempts native004 and native005 both failed setup before any model
 turn. Native004 did not reach the bundled Copilot menu before the handoff
 deadline; native005 recorded a **Disable AI Features** observer expiry. The
 sanitized records do not establish whether native005's 180-second extension
@@ -229,6 +229,32 @@ private configurations were restored. These setup-only results are neither
 evidence for nor against the shared route, do not supersede the immutable
 native003 Local security failures, and do not claim a source fix, fresh
 shared qualification, or supported floor.
+
+On November 10, native007 on the Atlanta physical Mac passed workspace trust,
+AI enablement, and registration of the signed built-in Copilot Chat 0.73.0.
+The fresh renderer log resolved exactly one wrapped dummy model for the QA
+extension's vendor and model ID. The extension's public
+`vscode.lm.selectChatModels` call returned no matching model. The attempt
+ended before the model picker handoff or any turn. The recording contains
+zero provider requests. The owned process exited and the private configuration
+was restored. The SHA-256 of the retained evidence archive is
+`c1068045d65ce2db4c5fd25bea83822e3c5d9959b4b4891825399427f3ddecab`.
+
+This observation follows from the signed 1.145.2 build at
+`c4453f8ea430795f941c1b2ff6c9321135a74a02`. Its renderer registers the Agent
+Host wrapper directly with the workbench language-model service. The
+extension host's `selectLanguageModels` receives identifiers from that
+service, then `_createLanguageModelChatApi` constructs an API object only for
+identifiers in its extension-local `_localModels` map. The signed extension
+host populates that map through extension providers' chat-information
+callbacks. On this build, polling the extension API can observe the
+extension-contributed dummy, but cannot attest its workbench-only wrapper.
+
+The renderer's `[LM] selected language models` line records the result of a
+registry query issued by the QA extension. It precedes the visible picker
+handoff. The archive contains zero completed chat turns and provides no
+evidence of an operator selecting the wrapped model or an actual shared
+session consuming it. Those actions still require independent observation.
 
 ```sh
 export SILMARIL_NATIVE_SESSION_ROUTE=shared-copilot
