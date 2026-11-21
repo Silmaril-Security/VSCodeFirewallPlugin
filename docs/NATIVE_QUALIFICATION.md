@@ -466,3 +466,13 @@ pass that preserves the strict title-request and post-tool-poison oracles. The
 shared transformed-prompt and `modifiedResult` contracts remain source-only
 until a supported shared Agent Host route proves them. Do not publish 0.3.1 or
 modify or relabel 0.3.0.
+
+## Release acceptance on MacStadium
+
+The release driver installs the exact standalone archive in a private home. For the macOS-managed channel it verifies the notarized Silmaril package, signed app, macOS source commit, adapter version, and each adapter and runtime digest before staging the payload. It uses the shared physical-host lease throughout. The managed reference editor is signed Microsoft VS Code 1.145.3. The standalone reference editor is 1.145.2. Install each reference in `/Applications/VSCode-QA-<version>.app` or use `/Applications/Visual Studio Code.app` when that version matches.
+
+The `silmaril-macstadium-gui` listener runs the job in the dedicated standard `silmarilreleaseqa` user's active Aqua session. Before enabling the job, open a dedicated QA profile and workspace with the reference editor. Sign in with the entitled test Copilot identity, grant normal workspace trust, and select the shared Copilot harness and test model. Verify a real Read tool completes there. Close the editor to checkpoint its workbench databases. Use a QA-only profile with plain JSON settings and no other agent plugins. Keep the QA account's persistent standalone firewall configuration empty. The driver copies the closed workbench state into private run storage and registers the exact candidate there.
+
+Place a root-owned, read-only-to-the-runner JSON descriptor at `/Users/Shared/silmaril-release-qa/vscode-qa-identity.json`. Its fields are `account` (the standard QA login), `profileTemplate` (the absolute dedicated user-data directory containing `User/settings.json` and `User/globalStorage/state.vscdb`), and `workspace` (the absolute dedicated workspace that the operator trusted). Both directories belong to that user and live in their home. Provide the Test Tenant HTTPS endpoint and key as `CUSTOMER_NATIVE_API_URL` and `CUSTOMER_NATIVE_API_KEY`.
+
+The driver submits a fresh permitted file-read through the editor's public `code chat` command. It requires a shared-session completion in the signed renderer, a fresh prompt fingerprint, and allowed Read tool-call and result classifications from the installed adapter in that session. The live check uses the configured Test Tenant. A missing login, trust decision or model entitlement requires provisioning. A completed turn with missing callbacks fails. This benign release check preserves the separate standalone 0.3.1 publication hold and the native qualification matrix above.

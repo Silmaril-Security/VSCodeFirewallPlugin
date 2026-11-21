@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Install the exact standalone archive or managed signed payload in a private home."""
+import gzip
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+from macos_release_lease import PhysicalHostUnavailable, physical_lease
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with path.open("rb") as file:
+        while block := file.read(1024 * 1024):
+            h.update(block)
+    return h.hexdigest()
+
+
+def command(*args, **kwargs):
+    return subprocess.run(args, capture_output=True, check=True, timeout=300, **kwargs)
+
+
+def copy_verified(src, dest, expected):
+    require(not src.is_symlink() and src.is_file() and digest(src) == expected, "Invalid payload file")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    require(digest(dest) == expected, "Staged file differs from signed payload")
+
+
+def stage_managed(package, version, source, private, plugin, home):
+    signature = command("/usr/sbin/pkgutil", "--check-signature", package).stdout
+    require(b"Developer ID Installer: Silmaril Security, Inc. (283RWQ5S7X)" in signature and
+            b"trusted by the Apple notary service" in signature, "Unsigned or unexpected installer")
+    command("/usr/sbin/spctl", "--assess", "--type", "install", package)
+    expanded = private / "expanded"
+    command("/usr/sbin/pkgutil", "--expand-full", package, expanded)
+    apps = list(expanded.glob("*/Payload/Silmaril.app"))
+    require(len(apps) == 1, "Expected one Silmaril application in the package")
+    app = apps[0]
+    requirement = '=anchor apple generic and identifier "dev.silmaril.SilmarilMacOS" and certificate leaf[subject.OU] = "283RWQ5S7X"'
+    command("/usr/bin/codesign", "--verify", "--deep", "--strict", app)
+    command("/usr/bin/codesign", "--verify", "--strict", "-R", requirement, app)
+    resources = app / "Contents" / "Resources"
+    require(json.loads((resources / "SilmarilBuild.json").read_text())["sourceCommit"] == source,
+            "Package source does not match macOS release")
+    bundle = resources / "IntegrationBundle"
+    manifest = json.loads((bundle / "IntegrationBundleManifestV1.json").read_text())
+    rows = [r for r in manifest["harnesses"] if r["harness"] == "vscode"]
+    require(len(rows) == 1, "No unique managed VS Code adapter")
+    row = rows[0]
+    prefix = Path("adapters/vscode")
+    require(manifest["schemaVersion"] == 1 and row["adapterPath"] == prefix.as_posix()
+            and row["adapterVersion"] == version, "Managed adapter identity differs")
+    expected = {item["relativePath"]: item["sha256"] for item in row["artifacts"]}
+    files = {f.relative_to(bundle).as_posix() for f in (bundle / prefix).rglob("*") if f.is_file()}
+    require(files == expected.keys() and "adapters/vscode/com.github.copilot/hooks/hooks.json" in files,
+            "Unexpected managed adapter file set")
+    for name, hashed in expected.items():
+        file = (bundle / name).resolve(strict=True)
+        require(file.is_relative_to((bundle / prefix).resolve(strict=True)), "Adapter path escaped bundle")
+        copy_verified(file, plugin / Path(name).relative_to(prefix), hashed)
+    require(manifest["runtimePath"] == "runtime/SilmarilHookRuntime", "Unexpected managed runtime")
+    runtime = home / "Library/Application Support/Silmaril/Runtime/vscode/SilmarilHookRuntime"
+    copy_verified(bundle / manifest["runtimePath"], runtime, manifest["runtimeSHA256"])
+    probe = command(runtime, "--harness", "vscode", "--self-test", env={"HOME": str(home), "PATH": "/usr/bin:/bin"})
+    result = json.loads(probe.stdout)["nativeOutput"]
+    require(result["harness"] == "vscode" and result["ready"] is True, "Managed runtime self-test failed")
+
+
+def stage_standalone(archive, version, source, plugin, home):
+    # Committed release assets use git archive's global PAX commit marker. Only
+    # copy the runtime files that the customer's standalone installation needs.
+    required = {
+        "plugin.json", "com.github.copilot/hooks/hooks.json",
+        "scripts/run-hook.sh", "dist/vscode-hook.js",
+    }
+    with tarfile.open(archive, "r:gz") as tar:
+        require(tar.pax_headers.get("comment") == source, "Source archive commit mismatch")
+    extracted = home.parent / "standalone"
+    command(sys.executable, os.environ["CUSTOMER_ARCHIVE_HELPER"], archive, extracted, "--prefix", "source")
+    for rel in sorted(required):
+        path = extracted / rel
+        copy_verified(path, plugin / rel, digest(path))
+    require(json.loads((plugin / "plugin.json").read_text())["version"] == version, "Standalone version differs")
+    node = shutil.which("node")
+    if not node:
+        raise PhysicalHostUnavailable("Node.js 22 or later is required")
+    node = Path(node).resolve(strict=True)
+    require(int(command(node, "--version").stdout.decode().strip().lstrip("v").split(".")[0]) >= 22,
+            "Unsupported Node.js")
+    path_file = home / ".vscode/silmaril-firewall-node-path"
+    path_file.write_text(str(node) + "\n")
+    path_file.chmod(0o600)
+
+
+def run(checks):
+    artifact = Path(os.environ["CUSTOMER_ARTIFACT"]).resolve(strict=True)
+    version = os.environ["CUSTOMER_VERSION"]
+    source = os.environ["CUSTOMER_SOURCE_SHA"]
+    expected = os.environ["CUSTOMER_ARTIFACT_SHA256"]
+    require(re.fullmatch(r"\d+\.\d+\.\d+", version) and re.fullmatch(r"[0-9a-f]{40}", source)
+            and re.fullmatch(r"[0-9a-f]{64}", expected), "Malformed release identity")
+    require(digest(artifact) == expected, "Artifact SHA-256 mismatch")
+    checks["artifact_integrity"] = "PASS"
+    owner = os.environ.get("CUSTOMER_MANAGED_OWNER", "")
+    require(owner in ("", "SilmarilMacOS"), "Unknown managed owner")
+    with physical_lease(), tempfile.TemporaryDirectory(prefix="vscode-customer-") as temp:
+        private = Path(temp).resolve()
+        home = private / "home"
+        home.mkdir(mode=0o700)
+        plugin = home / ".vscode/silmaril-firewall"
+        if owner:
+            stage_managed(artifact, version, source, private, plugin, home)
+            checks["managed_runtime_self_test"] = "PASS"
+        else:
+            stage_standalone(artifact, version, source, plugin, home)
+        require(json.loads((plugin / "plugin.json").read_text())["version"] == version,
+                "Installed adapter version differs")
+        checks["payload_install"] = "PASS"
+        if not owner and version == "0.3.1":
+            checks["publication_hold"] = "BLOCKED"
+        from customer_vscode_editor import run_editor_checks
+        checks.update(run_editor_checks(home, plugin, bool(owner), version))
+
+
+def main():
+    result = Path(os.environ["CUSTOMER_RESULT"])
+    checks = dict.fromkeys(("install", "native", "live"), "BLOCKED")
+    try:
+        run(checks)
+    except PhysicalHostUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+    except (ValueError, OSError, KeyError, tarfile.TarError, gzip.BadGzipFile,
+            subprocess.SubprocessError) as exc:
+        checks["driver"] = "FAIL"
+        print(f"VS Code acceptance failed ({type(exc).__name__})", file=sys.stderr)
+    with tempfile.NamedTemporaryFile("w", dir=result.parent, delete=False) as f:
+        json.dump(checks, f)
+    os.replace(f.name, result)
+    return int(any(value != "PASS" for value in checks.values()))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
