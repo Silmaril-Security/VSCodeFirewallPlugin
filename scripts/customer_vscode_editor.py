@@ -1,6 +1,7 @@
 """Run one ordinary Read through the signed editor and the installed firewall adapter."""
 import contextlib
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -199,6 +200,29 @@ def launch(binary, cli, profile, workspace, env):
             pass
 
 
+def verify_managed_endpoint(url, key):
+    # Signed native runtimes give device management precedence over the staged
+    # local config. Only the intended tenant can supply this run's evidence.
+    policy = Path("/Library/Managed Preferences/dev.silmaril.SilmarilMacOS.plist")
+    try:
+        metadata = policy.lstat()
+    except FileNotFoundError:
+        return
+    prerequisite(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == 0 and not metadata.st_mode & 0o022,
+                 "Untrusted managed policy file")
+    try:
+        with policy.open("rb") as stream:
+            forced = plistlib.load(stream)
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise PhysicalHostUnavailable("Cannot verify the managed Test Tenant binding") from error
+    expected = {"silmaril.apiURL": url, "silmaril.apiKey": key}
+    for name, value in expected.items():
+        if name in forced:
+            actual = forced[name]
+            prerequisite(isinstance(actual, str) and hmac.compare_digest(actual.encode(), value.encode()),
+                         "Device policy selects a different Test Tenant connection")
+
+
 def journey(home, plugin, managed, version, checks):
     account_home, seed, workspace = qa_directories()
     binary, cli = verify_editor(managed)
@@ -210,6 +234,7 @@ def journey(home, plugin, managed, version, checks):
     prerequisite(target.scheme == "https" and target.hostname and not target.username and not target.password and key,
                  "A dedicated HTTPS Test Tenant endpoint and key are required")
     if managed:
+        verify_managed_endpoint(url, key)
         prerequisite(not (account_home / ".vscode/silmaril-firewall.json").exists(),
                      "The dedicated QA account has a conflicting persistent firewall configuration")
     # The release job holds the cross-repository physical lock. Isolate the product config and editor data.
