@@ -412,6 +412,14 @@ def run_editor_checks(home, plugin, managed, version):
         journey(home, plugin, managed, version, checks)
     except PhysicalHostUnavailable as exc:
         print(str(exc), file=sys.stderr)
+    except subprocess.CalledProcessError as exc:
+        # Only report a known operation. The editor CLI arguments can include a prompt.
+        executable = exc.cmd[0] if isinstance(exc.cmd, (tuple, list)) and exc.cmd else None
+        operation = {"/usr/bin/codesign": "editor signature verification",
+                     "/usr/sbin/spctl": "editor Gatekeeper assessment",
+                     "/usr/bin/id": "QA account verification"}.get(executable, "editor command")
+        print(f"Editor acceptance failed during {operation} (exit {exc.returncode})", file=sys.stderr)
+        checks["native"] = "FAIL"
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
         print(f"Editor acceptance failed ({type(exc).__name__})", file=sys.stderr)
         checks["native"] = "FAIL"
