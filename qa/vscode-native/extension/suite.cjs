@@ -758,7 +758,7 @@ async function diagnoseSharedModel(receipt, api, expectedModel) {
   const query = `Please acknowledge this diagnostic reference: ${randomUUID()}`;
   // Keep the operator-selected session and model. No selector or tool is forced.
   await vscode.commands.executeCommand("workbench.action.chat.open", {
-    query, toolsInclude: [], blockOnResponse: true,
+    query, blockOnResponse: true,
   });
   receipt.turns.push({ name: "benign-diagnostic", query });
   receipt.sessionRoute.firstTurnEvidence = await waitForFirstSharedTurnEvidence();
