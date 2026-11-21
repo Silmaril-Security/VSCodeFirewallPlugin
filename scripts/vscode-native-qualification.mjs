@@ -42,6 +42,10 @@ const {
 } = require(
   "../qa/vscode-native/extension/agent-ui-policy.cjs",
 );
+const {
+  parseChatTurnRows, readFreshRendererLogs, rendererWrappedModel,
+  validateFirstSharedTurnRows, validateSelectionActionAttestation,
+} = require("../qa/vscode-native/extension/shared-route-policy.cjs");
 const { parseProviderJournalBytes } = require(
   "../qa/vscode-native/extension/provider-journal.cjs",
 );
@@ -2259,6 +2263,11 @@ export function finalizeQualificationOutcome({
   if (
     !finalFailure
     && receipt.result !== "pass"
+    && !(receipt.result === "diagnostic-observed"
+      && receipt.qualification === "vscode-benign-model-diagnostic"
+      && receipt.resultScope === "benign-shared-model-only"
+      && hasProcessLaunchReceipt
+      && receipt.coverage?.nativeCore?.result === "not-run")
     && !acceptedNonNativeResult
   ) {
     finalFailure = new Error(
@@ -2434,6 +2443,11 @@ export async function qualifyNativeVSCode(env = process.env) {
   const receiptPath = env.NATIVE_QUALIFICATION_RECEIPT;
   assert.ok(app && path.isAbsolute(app), "VSCODE_APP must be absolute");
   const policy = resolvePortableQaPolicy(env);
+  if (env.SILMARIL_NATIVE_BENIGN_DIAGNOSTIC !== undefined) {
+    assert.equal(env.SILMARIL_NATIVE_BENIGN_DIAGNOSTIC, "1");
+    assert.equal(policy.sessionRoute, "shared-copilot", "Diagnostic requires shared-route source guards");
+  }
+  const diagnostic = env.SILMARIL_NATIVE_BENIGN_DIAGNOSTIC === "1";
   const layout = await createFreshQaLayout({
     privateRoot,
     receiptPath,
@@ -2461,7 +2475,7 @@ export async function qualifyNativeVSCode(env = process.env) {
   );
   const receipt = {
     schemaVersion: 1,
-    qualification: "vscode-native-built-in-agent-hooks",
+    qualification: diagnostic ? "vscode-benign-model-diagnostic" : "vscode-native-built-in-agent-hooks",
     resultScope: "source-preflight",
     result: "fail",
     coverage: createQualificationCoverage(),
@@ -2705,7 +2719,8 @@ export async function qualifyNativeVSCode(env = process.env) {
     receipt.resultScope = policy.sessionRoute === "shared-copilot"
       ? "shared-copilot-four-case-native-core"
       : "four-case-native-core";
-    receipt.coverage.nativeCore.result = "fail";
+    if (diagnostic) receipt.resultScope = "benign-shared-model-only";
+    else receipt.coverage.nativeCore.result = "fail";
 
     classifier = startClassifier();
     proxy = startDestinationProxy();
@@ -2892,6 +2907,7 @@ export async function qualifyNativeVSCode(env = process.env) {
             SILMARIL_NATIVE_SHARED_MODEL_PENDING_PATH:
               pendingSharedModelPath,
             SILMARIL_NATIVE_SESSION_ROUTE: policy.sessionRoute,
+            ...(diagnostic ? { SILMARIL_NATIVE_BENIGN_DIAGNOSTIC: "1" } : {}),
           }
         : {}),
       SILMARIL_NATIVE_PROFILE_RESOLVED_PATH: profileResolvedPath,
@@ -3149,14 +3165,44 @@ export async function qualifyNativeVSCode(env = process.env) {
     };
     receipt.classifierRequests = classifier.requests;
     const preMarkerExists = await pathExists(preMarkerPath);
-    validateNativeEvidence(
-      capture,
-      classifier.requests,
-      preMarkerExists,
-      receipt.coverage,
-      policy.sessionRoute,
-      runtimeLogs.combinedLogs,
-    );
+    if (policy.sessionRoute === "shared-copilot") {
+      const logs = await readFreshRendererLogs(userData);
+      const id = "silmaril-native-qa-dummy-8d724ae7/silmaril-native-qa-local-deterministic-8d724ae7";
+      const observed = rendererWrappedModel(logs, id);
+      assert.ok(observed, "Missing independently observed renderer wrapper");
+      assert.deepEqual(capture.sessionRoute.publicWrappedModel, observed);
+      const attestation = JSON.parse(await readFile(pendingSharedModelPath, "utf8"));
+      assert.equal(attestation.normalUiActions.sessionHarness.observationSource, "normal-visible-ui");
+      assert.deepEqual(validateSelectionActionAttestation(attestation, observed),
+        capture.sessionRoute.selectionAttestation);
+      const firstTurn = validateFirstSharedTurnRows(parseChatTurnRows(logs));
+      assert.equal(firstTurn.firstTurn.logFile, observed.logFile);
+      assert.deepEqual(firstTurn.firstTurn, capture.sessionRoute.firstTurnEvidence.firstTurn);
+      assert.equal(capture.sessionRoute.firstTurnEvidence.observedTurnCount, 1);
+      if (diagnostic) assert.equal(firstTurn.observedTurnCount, 1);
+    }
+    if (diagnostic) {
+      assert.equal(capture.result, "diagnostic-observed");
+      assert.equal(capture.turns.length, 1);
+      const [turn] = capture.turns;
+      assert.equal(turn.name, "benign-diagnostic");
+      assert.match(turn.query, /^Please acknowledge this diagnostic reference: [0-9a-f-]{36}$/u);
+      assert.ok(capture.providerRequests.every((request) =>
+        request.model.id === "silmaril-native-qa-local-deterministic-8d724ae7"));
+      assert.ok(capture.providerRequests.some((request) =>
+        requestStrings(request).some((value) => value.includes(turn.query))));
+      assert.ok(Object.values(capture.toolInvocations).every((count) => count === 0));
+      assert.equal(preMarkerExists, false);
+    } else {
+      validateNativeEvidence(
+        capture,
+        classifier.requests,
+        preMarkerExists,
+        receipt.coverage,
+        policy.sessionRoute,
+        runtimeLogs.combinedLogs,
+      );
+    }
     receipt.evidence = await listEvidence(evidence);
 
     const actualDestinations = proxy.destinations.map((entry) => entry.destination);
@@ -3170,8 +3216,12 @@ export async function qualifyNativeVSCode(env = process.env) {
       false,
       "A real model/provider destination was requested",
     );
-    receipt.coverage.nativeCore.result = "pass";
-    receipt.result = "pass";
+    if (diagnostic) {
+      receipt.result = "diagnostic-observed";
+    } else {
+      receipt.coverage.nativeCore.result = "pass";
+      receipt.result = "pass";
+    }
   } catch (error) {
     failure = error;
     if (
@@ -3321,7 +3371,7 @@ export async function qualifyNativeVSCode(env = process.env) {
             "Native provider/tool journal failed integrity validation",
           );
         }
-        if (receipt.result === "pass") {
+        if (["pass", "diagnostic-observed"].includes(receipt.result)) {
           receipt.providerJournal.finishedCaptureConsistency =
             validateProviderJournalCapture(
               receipt.providerJournal,

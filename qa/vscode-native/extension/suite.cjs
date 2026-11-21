@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
@@ -20,9 +20,10 @@ const {
   modelSelectorForRoute,
   modelSelectorFromPublicModel,
   readFreshProfileTurnRows,
+  readFreshRendererLogs,
+  rendererWrappedModel,
   validateFirstSharedTurnRows,
   validateSelectionActionAttestation,
-  validateWrappedModels,
 } = require("./shared-route-policy.cjs");
 const { workspaceTrustAction } = require("./trust-policy.cjs");
 
@@ -734,6 +735,45 @@ async function waitForFirstSharedTurnEvidence(timeoutMs = 5_000) {
   return validateFirstSharedTurnRows([]);
 }
 
+async function selectSharedModel(receipt, api, expectedModel) {
+  const { constants, state } = api;
+  const userData = process.env.SILMARIL_NATIVE_USER_DATA;
+  const deadline = Date.now() + 30_000;
+  let model;
+  do {
+    // A registry query triggers renderer discovery even when the extension API
+    // cannot construct a language-model object for the renderer-owned provider.
+    await vscode.lm.selectChatModels(expectedModel);
+    model = rendererWrappedModel(await readFreshRendererLogs(userData), expectedModel.id);
+    if (!model) await new Promise((resolve) => setTimeout(resolve, 200));
+  } while (!model && Date.now() < deadline);
+  assert.ok(model, "Missing wrapped model in fresh renderer registry");
+  receipt.sessionRoute.publicWrappedModel = model;
+  receipt.sessionRoute.selectionAttestation = await prepareSharedModelHandoff(constants, model);
+  assert.equal(receipt.sessionRoute.selectionAttestation.normalUiActions.sessionHarness.observationSource,
+    "normal-visible-ui", "Shared route requires an observed visible picker action");
+  assert.equal((await readFreshProfileTurnRows(userData)).length, 0);
+  assert.equal(state.providerRequests.length, 0);
+  return modelSelectorFromPublicModel(model);
+}
+
+async function runSelectedSharedTurn(receipt, api, query) {
+  const { constants, state, collectStrings } = api;
+  // Keep the operator-selected session and model. No selector or tool is forced.
+  const result = await vscode.commands.executeCommand("workbench.action.chat.open", {
+    query, blockOnResponse: true,
+  });
+  receipt.sessionRoute.firstTurnEvidence = await waitForFirstSharedTurnEvidence();
+  assert.equal(receipt.sessionRoute.firstTurnEvidence.observedTurnCount, 1);
+  assert.equal(receipt.sessionRoute.firstTurnEvidence.firstTurn.logFile,
+    receipt.sessionRoute.publicWrappedModel.logFile);
+  assert.ok(state.providerRequests.some((request) =>
+    request.model.id === constants.MODEL_ID && collectStrings(request.messages)
+      .some((text) => text.includes(query))), "Dummy provider missed the first permitted prompt");
+  assert.ok(Object.values(state.toolInvocations).every((count) => count === 0));
+  return result;
+}
+
 async function run() {
   const capturePath = process.env.SILMARIL_NATIVE_CAPTURE_PATH;
   assert.ok(capturePath && path.isAbsolute(capturePath), "Missing private capture path");
@@ -868,16 +908,15 @@ async function run() {
       assert.equal(titleGeneration.workspaceValue, undefined);
       assert.equal(titleGeneration.workspaceFolderValue, undefined);
       receipt.sessionRoute.titleGeneration = titleGeneration;
-      const wrapped = [await waitForModels(
-        expectedModelSelector.vendor,
-        expectedModelSelector.id,
-      )];
-      const publicModel = validateWrappedModels(wrapped, constants);
-      receipt.sessionRoute.publicWrappedModel = publicModel;
-      receipt.sessionRoute.selectionAttestation =
-        await prepareSharedModelHandoff(constants, publicModel);
-      modelSelector = modelSelectorFromPublicModel(publicModel);
+      modelSelector = await selectSharedModel(receipt, api, expectedModelSelector);
       receipt.sessionRoute.modelSelector = modelSelector;
+      if (process.env.SILMARIL_NATIVE_BENIGN_DIAGNOSTIC === "1") {
+        const query = `Please acknowledge this diagnostic reference: ${randomUUID()}`;
+        await runSelectedSharedTurn(receipt, api, query);
+        receipt.turns.push({ name: "benign-diagnostic", query });
+        receipt.result = "diagnostic-observed";
+        return;
+      }
     }
 
     const turnInputs = [
@@ -904,7 +943,9 @@ async function run() {
     ];
     for (const [index, input] of turnInputs.entries()) {
       const requestStart = state.providerRequests.length;
-      const result = await runTurn(modelSelector, input.query, input.tools);
+      const result = sessionRoute === SHARED_COPILOT_ROUTE && index === 0
+        ? await runSelectedSharedTurn(receipt, api, input.query)
+        : await runTurn(modelSelector, input.query, input.tools);
       receipt.turns.push({
         name: input.name,
         query: input.query,
@@ -912,10 +953,6 @@ async function run() {
         providerRequestStart: requestStart,
         providerRequestEnd: state.providerRequests.length,
       });
-      if (sessionRoute === SHARED_COPILOT_ROUTE && index === 0) {
-        receipt.sessionRoute.firstTurnEvidence =
-          await waitForFirstSharedTurnEvidence();
-      }
     }
 
     const preMarkerPath = process.env.SILMARIL_NATIVE_PRE_MARKER_PATH;

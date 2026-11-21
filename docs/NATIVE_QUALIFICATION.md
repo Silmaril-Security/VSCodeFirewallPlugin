@@ -212,7 +212,7 @@ does not record a native pass, does not establish a supported floor, and does
 not change the incomplete release/Warn/Shadow/batch-resume status. Add both
 the route opt-in and a fourth contained handoff:
 
-Current status: native004 and native005 both failed setup before any model
+Earlier attempts native004 and native005 both failed setup before any model
 turn. Native004 did not reach the bundled Copilot menu before the handoff
 deadline; native005 recorded a **Disable AI Features** observer expiry. The
 sanitized records do not establish whether native005's 180-second extension
@@ -230,11 +230,68 @@ evidence for nor against the shared route, do not supersede the immutable
 native003 Local security failures, and do not claim a source fix, fresh
 shared qualification, or supported floor.
 
+On November 10, native007 on the Atlanta physical Mac passed workspace trust,
+AI enablement, and registration of the signed built-in Copilot Chat 0.73.0.
+The fresh renderer log resolved exactly one wrapped dummy model for the QA
+extension's vendor and model ID. The extension's public
+`vscode.lm.selectChatModels` call returned no matching model. The attempt
+ended before the model picker handoff or any turn. The recording contains
+zero provider requests. The owned process exited and the private configuration
+was restored. The SHA-256 of the retained evidence archive is
+`c1068045d65ce2db4c5fd25bea83822e3c5d9959b4b4891825399427f3ddecab`.
+
+This observation follows from the signed 1.145.2 build at
+`c4453f8ea430795f941c1b2ff6c9321135a74a02`. Its renderer registers the Agent
+Host wrapper directly with the workbench language-model service. The
+extension host's `selectLanguageModels` receives identifiers from that
+service, then `_createLanguageModelChatApi` constructs an API object only for
+identifiers in its extension-local `_localModels` map. The signed extension
+host populates that map through extension providers' chat-information
+callbacks. On this build, polling the extension API can observe the
+extension-contributed dummy, but cannot attest its workbench-only wrapper.
+
+The renderer's `[LM] selected language models` line records the result of a
+registry query issued by the QA extension. It precedes the visible picker
+handoff. The archive contains zero completed chat turns and provides no
+evidence of an operator selecting the wrapped model or an actual shared
+session consuming it. The November 20 physical run below captured both actions and one executed turn.
+
 ```sh
 export SILMARIL_NATIVE_SESSION_ROUTE=shared-copilot
 export NATIVE_SHARED_MODEL_PENDING_PATH="$QA_ROOT/handoffs/shared-model.json"
 # Then run the reviewed human command above with these two exports present.
 ```
+
+### Benign shared-model diagnostic
+
+Set `SILMARIL_NATIVE_BENIGN_DIAGNOSTIC=1` alongside the two shared-route exports
+above. Run the portable preflight command first, using an unused private
+root. For a GUI run, use a second fresh root and the four normal visible UI
+handoffs. Record `normal-visible-ui` as the session picker's observation
+source only after observing it. The signed app, in-memory secret storage,
+network restrictions, and cleanup checks apply to this mode.
+
+The diagnostic checks the exact wrapped model in the fresh renderer registry
+and asks the operator to select it in the normal picker. It then sends one
+unique harmless acknowledgement request to the selected chat. The launcher
+checks the single completed shared-session turn in that same renderer,
+correlates the request with the registered dummy provider's journal, and
+checks zero tool invocations. A completed diagnostic records
+`diagnostic-observed`. Native core stays `not-run` and release qualification
+stays `incomplete`.
+
+On November 20, the Atlanta physical Mac ran this diagnostic on signed VS Code
+1.145.2. The operator selected Copilot in the chat harness picker and the
+registered dummy in its model picker. The same fresh renderer recorded exactly
+one completed `agent-host-copilotcli` turn. Its model field was `unknown`.
+The independent provider journal identified the exact dummy and the unique
+prompt. The installed hook recorded one benign `copilot/userPromptTransformed`
+classification, and both test tool counters were zero. The receipt SHA-256 is
+`e08445d4d4898461c4d20d032bec62c280acba3b2e519f43c207f7c9e452e7cf`.
+
+The shared qualification entry point uses the same renderer registry, visible
+selection and first permitted turn. Later cases keep their existing callback
+and provider checks. The four-case suite has yet to qualify on this build.
 
 The fresh private application settings include
 `chat.agentHost.experimental.titleGeneration=activeAgent` only for this
@@ -280,16 +337,17 @@ replace the fourth contained marker with:
 }
 ```
 
-Use `fresh-profile-host-log` instead of `normal-visible-ui` only when that is
-the actual observation source. This marker attests only the two visible
-selection actions. It cannot satisfy route qualification. The source guard
+Record `normal-visible-ui` after observing both picker actions. The launch
+independently verifies the registered wrapper in that same renderer. This
+marker attests only the two visible selection actions. It cannot satisfy route qualification. The source guard
 identifies `targetChatSessionType` handling as telemetry, not route creation:
 the wrapped model is filtered from the Local picker and becomes selectable
 only for an already selected matching non-Local session. The visible New Chat
 path forwards the current session type. The expected wrapper identity is used
 only to query and validate one public wrapped model; after the handoff, the
 turn selector is copied from that observed model's exact public `vendor` and
-`id`. Model selection alone does not create or prove the shared route.
+`id` for subsequent cases. The first permitted turn retains the operator-selected
+session and model. Model selection alone does not prove execution.
 
 The first query is the safe allow case. Before any blocked-prompt or synthetic
 tool fixture is sent, the suite polls only regular `.log` files under the
@@ -408,3 +466,15 @@ pass that preserves the strict title-request and post-tool-poison oracles. The
 shared transformed-prompt and `modifiedResult` contracts remain source-only
 until a supported shared Agent Host route proves them. Do not publish 0.3.1 or
 modify or relabel 0.3.0.
+
+## Release acceptance on MacStadium
+
+The release driver installs the exact standalone archive in a private home. For the macOS-managed channel it verifies the notarized Silmaril package, signed app, macOS source commit, adapter version, and each adapter and runtime digest before staging the payload. It uses the shared physical-host lease throughout. The managed reference editor is signed Microsoft VS Code 1.145.3. The standalone reference editor is 1.145.2. Install each reference in `/Applications/VSCode-QA-<version>.app` or use `/Applications/Visual Studio Code.app` when that version matches.
+
+The `silmaril-macstadium-gui` listener runs the job in the dedicated standard `silmarilreleaseqa` user's active Aqua session. Before enabling the job, open a dedicated QA profile and workspace with the reference editor. Sign in with the entitled test Copilot identity, grant normal workspace trust, and select the shared Copilot harness and test model. Verify a real Read tool completes there. Close the editor to checkpoint its workbench databases. Use a QA-only profile with plain JSON settings and no other agent plugins. Keep the QA account's persistent standalone firewall configuration empty. The driver copies the closed workbench state into private run storage and registers the exact candidate there.
+
+Place a root-owned, read-only-to-the-runner JSON descriptor at `/Users/Shared/silmaril-release-qa/vscode-qa-identity.json`. Its fields are `account` (the standard QA login), `profileTemplate` (the absolute dedicated user-data directory containing `User/settings.json` and `User/globalStorage/state.vscdb`), and `workspace` (the absolute dedicated workspace that the operator trusted). Both directories belong to that user and live in their home. Provide the Test Tenant HTTPS endpoint and key as `CUSTOMER_NATIVE_API_URL` and `CUSTOMER_NATIVE_API_KEY`.
+
+The driver submits four harmless file-read cases through `code chat`. On allow it requires a completed shared-session renderer turn, a fresh prompt fingerprint, both Read classifications in that session, and the actual file value in the signed client's final response. The three remaining cases exercise ordinary Test Tenant policy. Configure scoped rules that deny `RELEASE-QA-PROMPT-DENY` on `user_input`, `RELEASE-QA-READ-DENY` on `tool_call`, and `RELEASE-QA-RESULT-DENY` on `tool_response`. A default allow handles the remaining benign operations. The emitted check names are `prompt_denial`, `pre_tool_denial`, and `post_tool_denial`.
+
+Each denial requires a fresh installed-hook record for the exact session and the corresponding effect in the signed client's ordinary session history. Prompt replacement must replace the submitted request and prevent the requested read. For pre-tool denial and post-tool replacement, the client must show the returned denial reason and withhold the file's randomly generated value. Missing test policy, login, normal workspace trust, model entitlement or an observable client effect leaves the corresponding checks blocked. The aggregate `policy_denial` requires all three. The separate standalone 0.3.1 publication hold and the native qualification matrix above still apply.

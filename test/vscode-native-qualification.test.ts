@@ -595,9 +595,16 @@ test("first safe allow turn stops missing, Local, or mixed routes before later q
   ), "utf8");
   assert.match(
     suite,
-    /for \(const \[index, input\] of turnInputs\.entries\(\)\) \{[\s\S]*?await runTurn\(modelSelector, input\.query, input\.tools\);[\s\S]*?if \(sessionRoute === SHARED_COPILOT_ROUTE && index === 0\) \{[\s\S]*?await waitForFirstSharedTurnEvidence\(\);[\s\S]*?\}\s+\}/u,
+    /for \(const \[index, input\] of turnInputs\.entries\(\)\) \{[\s\S]*?sessionRoute === SHARED_COPILOT_ROUTE && index === 0\s+\? await runSelectedSharedTurn\(receipt, api, input\.query\)\s+: await runTurn\(modelSelector, input\.query, input\.tools\)/u,
     "First-turn route gate must run in the first iteration before the next query",
   );
+  const firstTurnBody = suite.slice(
+    suite.indexOf("async function runSelectedSharedTurn("),
+    suite.indexOf("async function run()"),
+  );
+  assert.match(firstTurnBody, /await waitForFirstSharedTurnEvidence\(\)/u);
+  assert.match(firstTurnBody, /state\.providerRequests\.some/u);
+  assert.doesNotMatch(firstTurnBody, /toolsInclude|modelSelector|chat\.newChat/u);
   assert.doesNotMatch(
     suite,
     /if \(index === 0\) \{\s+receipt\.sessionRoute\.firstTurnEvidence/u,
@@ -1549,15 +1556,13 @@ test("shared route uses only exact observed wrapped metadata and attestation is 
   ), "utf8");
   const handoff = suite.indexOf("await prepareSharedModelHandoff");
   const observedSelector = suite.indexOf(
-    "modelSelector = modelSelectorFromPublicModel(publicModel)",
+    "return modelSelectorFromPublicModel(model)",
     handoff,
   );
-  const firstTurn = suite.indexOf(
-    "await runTurn(modelSelector, input.query, input.tools)",
-    observedSelector,
-  );
+  const selected = suite.indexOf("modelSelector = await selectSharedModel(receipt, api, expectedModelSelector)", observedSelector);
+  const firstTurn = suite.indexOf("await runSelectedSharedTurn(receipt, api, input.query)", selected);
   assert.ok(
-    handoff > 0 && handoff < observedSelector && observedSelector < firstTurn,
+    handoff > 0 && handoff < observedSelector && observedSelector < selected && selected < firstTurn,
     "Shared turn selector must be assigned from observed metadata after handoff",
   );
 });
@@ -3165,4 +3170,25 @@ test("owned server close rejects when its callback never settles", async () => {
     /Timed out after 30ms/u,
   );
   assert.ok(Date.now() - started < 1_000);
+});
+
+test("the benign diagnostic accepts only current, unique, session-bound renderer identity", () => {
+  const { rendererWrappedModel } = require("../qa/vscode-native/extension/shared-route-policy.cjs");
+  const vendor = "agent-host-copilotcli";
+  const id = "dummy/model";
+  const row = {
+    identifier: `${vendor}:${id}`,
+    metadata: { vendor, id, name: "Dummy model", version: "1", family: id,
+      targetChatSessionType: vendor, byokModelIdentifier: id, isUserSelectable: true },
+  };
+  const prefix = `2026-11-10 15:45:00.001 [trace] [LM] Resolved language models for vendor ${vendor} `;
+  const log = (data: unknown) => ({ relativePath: "window1/renderer.log", text: prefix + JSON.stringify(data) });
+  assert.deepEqual(rendererWrappedModel([log([row])], id), {
+    source: "fresh-renderer-registry", vendor, id, name: "Dummy model",
+    family: id, version: "1", logFile: "window1/renderer.log",
+  });
+  assert.equal(rendererWrappedModel([{ ...log([row]), text: log([row]).text + "\n" + log([]).text }], id), undefined);
+  assert.throws(() => rendererWrappedModel([log([row, row])], id));
+  assert.throws(() => rendererWrappedModel([log([row]), log([row])], id));
+  assert.throws(() => rendererWrappedModel([log([{ ...row, metadata: { ...row.metadata, byokModelIdentifier: "other" } }])], id));
 });

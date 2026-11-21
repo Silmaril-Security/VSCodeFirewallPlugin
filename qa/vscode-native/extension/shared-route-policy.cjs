@@ -192,7 +192,7 @@ function validateFirstSharedTurnRows(rows) {
   };
 }
 
-async function readFreshProfileTurnRows(userData) {
+async function readFreshRendererLogs(userData) {
   assert.ok(
     userData && path.isAbsolute(userData),
     "Fresh-profile user-data path must be absolute",
@@ -236,7 +236,44 @@ async function readFreshProfileTurnRows(userData) {
     }
   };
   await visit(resolvedLogsRoot);
-  return parseChatTurnRows(logs);
+  return logs;
+}
+
+async function readFreshProfileTurnRows(userData) {
+  return parseChatTurnRows(await readFreshRendererLogs(userData));
+}
+
+function rendererWrappedModel(logs, expectedId) {
+  const marker = `[LM] Resolved language models for vendor ${WRAPPED_VENDOR} `;
+  const prefix = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[trace\] /u;
+  const candidates = [];
+  for (const log of logs) {
+    let latest;
+    for (const line of log.text.split(/\r?\n/u)) {
+      const entry = line.replace(prefix, "");
+      if (entry === line || !entry.startsWith(marker)) continue;
+      latest = JSON.parse(entry.slice(marker.length));
+    }
+    if (!latest) continue;
+    const found = latest.filter((entry) =>
+      entry.identifier === `${WRAPPED_VENDOR}:${expectedId}`);
+    if (found.length > 1) throw new Error("Ambiguous wrapped model");
+    if (found.length === 0) continue;
+    const m = found[0].metadata;
+    assert.equal(m.vendor, WRAPPED_VENDOR);
+    assert.equal(m.targetChatSessionType, WRAPPED_VENDOR);
+    assert.equal(m.byokModelIdentifier, expectedId);
+    assert.equal(m.id, expectedId);
+    assert.equal(m.isUserSelectable, true);
+    assert.equal(m.family, expectedId);
+    assert.ok(typeof m.name === "string" && m.name.length > 0);
+    assert.ok(typeof m.version === "string" && m.version.length > 0);
+    candidates.push({ source: "fresh-renderer-registry", vendor: m.vendor,
+      id: m.id, name: m.name, family: m.family, version: m.version,
+      logFile: log.relativePath });
+  }
+  assert.ok(candidates.length <= 1, "Ambiguous renderer windows");
+  return candidates[0];
 }
 
 module.exports = {
@@ -247,6 +284,8 @@ module.exports = {
   parseChatTurnRows,
   publicModelReceipt,
   readFreshProfileTurnRows,
+  readFreshRendererLogs,
+  rendererWrappedModel,
   validateSelectionActionAttestation,
   validateFirstSharedTurnRows,
   validateWrappedModels,
