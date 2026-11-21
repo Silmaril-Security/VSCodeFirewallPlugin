@@ -254,7 +254,7 @@ The renderer's `[LM] selected language models` line records the result of a
 registry query issued by the QA extension. It precedes the visible picker
 handoff. The archive contains zero completed chat turns and provides no
 evidence of an operator selecting the wrapped model or an actual shared
-session consuming it. Those actions still require independent observation.
+session consuming it. The November 20 physical run below captured both actions and one executed turn.
 
 ```sh
 export SILMARIL_NATIVE_SESSION_ROUTE=shared-copilot
@@ -279,6 +279,19 @@ correlates the request with the registered dummy provider's journal, and
 checks zero tool invocations. A completed diagnostic records
 `diagnostic-observed`. Native core stays `not-run` and release qualification
 stays `incomplete`.
+
+On November 20, the Atlanta physical Mac ran this diagnostic on signed VS Code
+1.145.2. The operator selected Copilot in the chat harness picker and the
+registered dummy in its model picker. The same fresh renderer recorded exactly
+one completed `agent-host-copilotcli` turn. Its model field was `unknown`.
+The independent provider journal identified the exact dummy and the unique
+prompt. The installed hook recorded one benign `copilot/userPromptTransformed`
+classification, and both test tool counters were zero. The receipt SHA-256 is
+`e08445d4d4898461c4d20d032bec62c280acba3b2e519f43c207f7c9e452e7cf`.
+
+The shared qualification entry point uses the same renderer registry, visible
+selection and first permitted turn. Later cases keep their existing callback
+and provider checks. The four-case suite has yet to qualify on this build.
 
 The fresh private application settings include
 `chat.agentHost.experimental.titleGeneration=activeAgent` only for this
@@ -324,16 +337,17 @@ replace the fourth contained marker with:
 }
 ```
 
-Use `fresh-profile-host-log` instead of `normal-visible-ui` only when that is
-the actual observation source. This marker attests only the two visible
-selection actions. It cannot satisfy route qualification. The source guard
+Record `normal-visible-ui` after observing both picker actions. The launch
+independently verifies the registered wrapper in that same renderer. This
+marker attests only the two visible selection actions. It cannot satisfy route qualification. The source guard
 identifies `targetChatSessionType` handling as telemetry, not route creation:
 the wrapped model is filtered from the Local picker and becomes selectable
 only for an already selected matching non-Local session. The visible New Chat
 path forwards the current session type. The expected wrapper identity is used
 only to query and validate one public wrapped model; after the handoff, the
 turn selector is copied from that observed model's exact public `vendor` and
-`id`. Model selection alone does not create or prove the shared route.
+`id` for subsequent cases. The first permitted turn retains the operator-selected
+session and model. Model selection alone does not prove execution.
 
 The first query is the safe allow case. Before any blocked-prompt or synthetic
 tool fixture is sent, the suite polls only regular `.log` files under the

@@ -595,9 +595,16 @@ test("first safe allow turn stops missing, Local, or mixed routes before later q
   ), "utf8");
   assert.match(
     suite,
-    /for \(const \[index, input\] of turnInputs\.entries\(\)\) \{[\s\S]*?await runTurn\(modelSelector, input\.query, input\.tools\);[\s\S]*?if \(sessionRoute === SHARED_COPILOT_ROUTE && index === 0\) \{[\s\S]*?await waitForFirstSharedTurnEvidence\(\);[\s\S]*?\}\s+\}/u,
+    /for \(const \[index, input\] of turnInputs\.entries\(\)\) \{[\s\S]*?sessionRoute === SHARED_COPILOT_ROUTE && index === 0\s+\? await runSelectedSharedTurn\(receipt, api, input\.query\)\s+: await runTurn\(modelSelector, input\.query, input\.tools\)/u,
     "First-turn route gate must run in the first iteration before the next query",
   );
+  const firstTurnBody = suite.slice(
+    suite.indexOf("async function runSelectedSharedTurn("),
+    suite.indexOf("async function run()"),
+  );
+  assert.match(firstTurnBody, /await waitForFirstSharedTurnEvidence\(\)/u);
+  assert.match(firstTurnBody, /state\.providerRequests\.some/u);
+  assert.doesNotMatch(firstTurnBody, /toolsInclude|modelSelector|chat\.newChat/u);
   assert.doesNotMatch(
     suite,
     /if \(index === 0\) \{\s+receipt\.sessionRoute\.firstTurnEvidence/u,
@@ -1549,15 +1556,13 @@ test("shared route uses only exact observed wrapped metadata and attestation is 
   ), "utf8");
   const handoff = suite.indexOf("await prepareSharedModelHandoff");
   const observedSelector = suite.indexOf(
-    "modelSelector = modelSelectorFromPublicModel(publicModel)",
+    "return modelSelectorFromPublicModel(model)",
     handoff,
   );
-  const firstTurn = suite.indexOf(
-    "await runTurn(modelSelector, input.query, input.tools)",
-    observedSelector,
-  );
+  const selected = suite.indexOf("modelSelector = await selectSharedModel(receipt, api, expectedModelSelector)", observedSelector);
+  const firstTurn = suite.indexOf("await runSelectedSharedTurn(receipt, api, input.query)", selected);
   assert.ok(
-    handoff > 0 && handoff < observedSelector && observedSelector < firstTurn,
+    handoff > 0 && handoff < observedSelector && observedSelector < selected && selected < firstTurn,
     "Shared turn selector must be assigned from observed metadata after handoff",
   );
 });

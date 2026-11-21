@@ -3165,25 +3165,28 @@ export async function qualifyNativeVSCode(env = process.env) {
     };
     receipt.classifierRequests = classifier.requests;
     const preMarkerExists = await pathExists(preMarkerPath);
+    if (policy.sessionRoute === "shared-copilot") {
+      const logs = await readFreshRendererLogs(userData);
+      const id = "silmaril-native-qa-dummy-8d724ae7/silmaril-native-qa-local-deterministic-8d724ae7";
+      const observed = rendererWrappedModel(logs, id);
+      assert.ok(observed, "Missing independently observed renderer wrapper");
+      assert.deepEqual(capture.sessionRoute.publicWrappedModel, observed);
+      const attestation = JSON.parse(await readFile(pendingSharedModelPath, "utf8"));
+      assert.equal(attestation.normalUiActions.sessionHarness.observationSource, "normal-visible-ui");
+      assert.deepEqual(validateSelectionActionAttestation(attestation, observed),
+        capture.sessionRoute.selectionAttestation);
+      const firstTurn = validateFirstSharedTurnRows(parseChatTurnRows(logs));
+      assert.equal(firstTurn.firstTurn.logFile, observed.logFile);
+      assert.deepEqual(firstTurn.firstTurn, capture.sessionRoute.firstTurnEvidence.firstTurn);
+      assert.equal(capture.sessionRoute.firstTurnEvidence.observedTurnCount, 1);
+      if (diagnostic) assert.equal(firstTurn.observedTurnCount, 1);
+    }
     if (diagnostic) {
       assert.equal(capture.result, "diagnostic-observed");
       assert.equal(capture.turns.length, 1);
       const [turn] = capture.turns;
       assert.equal(turn.name, "benign-diagnostic");
       assert.match(turn.query, /^Please acknowledge this diagnostic reference: [0-9a-f-]{36}$/u);
-      const logs = await readFreshRendererLogs(userData);
-      const id = "silmaril-native-qa-dummy-8d724ae7/silmaril-native-qa-local-deterministic-8d724ae7";
-      const observed = rendererWrappedModel(logs, id);
-      assert.ok(observed, "Missing independently observed renderer wrapper");
-      assert.deepEqual(capture.sessionRoute.rendererModel, observed);
-      const attestation = JSON.parse(await readFile(pendingSharedModelPath, "utf8"));
-      assert.equal(attestation.normalUiActions.sessionHarness.observationSource, "normal-visible-ui");
-      assert.deepEqual(validateSelectionActionAttestation(attestation, observed),
-        capture.sessionRoute.selectionAttestation);
-      const firstTurn = validateFirstSharedTurnRows(parseChatTurnRows(logs));
-      assert.equal(firstTurn.observedTurnCount, 1);
-      assert.equal(firstTurn.firstTurn.logFile, observed.logFile);
-      assert.deepEqual(firstTurn, capture.sessionRoute.firstTurnEvidence);
       assert.ok(capture.providerRequests.every((request) =>
         request.model.id === "silmaril-native-qa-local-deterministic-8d724ae7"));
       assert.ok(capture.providerRequests.some((request) =>
