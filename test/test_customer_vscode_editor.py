@@ -15,6 +15,16 @@ import customer_vscode_editor as driver
 
 class EditorObservationTests(unittest.TestCase):
 
+    def test_private_files_are_owner_only_and_never_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "settings.json"
+            with driver.create_private_file(path) as stream:
+                stream.write("first")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(FileExistsError):
+                driver.create_private_file(path)
+            self.assertEqual(path.read_text(), "first")
+
     def test_editor_command_failure_reports_only_the_known_operation(self):
         for executable, label in (("/usr/bin/codesign", "editor signature verification"),
                                   ("/private/qa/secret-path", "editor command")):

@@ -40,6 +40,11 @@ def run(*args, **kwargs):
                           timeout=45, **kwargs)
 
 
+def create_private_file(path):
+    """Create a new QA file without exposing its contents to other local users."""
+    return open(path, "x", opener=lambda name, flags: os.open(name, flags, 0o600))
+
+
 def read_json(path):
     return json.loads(path.read_bytes())
 
@@ -252,7 +257,7 @@ def journey(home, plugin, managed, version, checks):
                      "The dedicated QA account has a conflicting persistent firewall configuration")
     # The release job holds the cross-repository physical lock. Isolate the product config and editor data.
     config = home / ".vscode/silmaril-firewall.json"
-    with config.open("x", opener=lambda name, flags: os.open(name, flags, 0o600)) as f:
+    with create_private_file(config) as f:
         json.dump({"schemaVersion": 1, "enabled": True, "apiKey": key, "apiUrl": url, "mode": "block", "timeoutMs": 8000}, f)
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
            "HOME": str(home), "USER": pwd.getpwuid(os.getuid()).pw_name, "TMPDIR": str(home),
@@ -371,7 +376,7 @@ def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit,
     previous = {p for spool in spool_dirs for p in spool.glob(pattern)}
     offsets = {p: p.stat().st_size for p in (copilot / "session-state").glob("*/events.jsonl")
                if p.is_file() and p.resolve() == p}
-    with note.open("x", opener=lambda filename, flags: os.open(filename, flags, 0o600)) as f:
+    with create_private_file(note) as f:
         f.write(content + "\n")
     try:
         since = time.time() * 1000
