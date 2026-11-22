@@ -172,6 +172,8 @@ def valid_evidence(events, *, prompt, marker, version, managed):
     if len(sessions) != 1:
         return False
     matching = [e for e in rows if e.get("sessionFingerprint") in sessions]
+    if managed and any(e.get("hook") == "user_input" and e.get("mode") == "shadow" for e in matching):
+        raise PhysicalHostUnavailable("The managed VS Code runtime observed this QA turn in shadow mode; block mode is required")
     for event in matching:
         if (event.get("mode"), event.get("prediction"), event.get("policyDecision"), event.get("nativeAction")) != ("block", "benign", "allow", "allowed"):
             raise ValueError("The firewall did not allow the benign editor journey")
@@ -471,6 +473,39 @@ def denial_observed(events, history, *, scenario, prompt, marker, version, manag
     return "PASS" if BLOCK_MESSAGE in response else None
 
 
+def evidence_files(spool_dirs, pattern, managed):
+    for spool in spool_dirs:
+        yield from spool.glob(pattern)
+        if managed:
+            # The running Silmaril app can ingest and remove a runtime event between polls.
+            yield from (spool.parent / "receipts").glob("*.json")
+
+
+def fresh_events(paths, previous):
+    events = []
+    for path in paths:
+        if path in previous or not path.is_file() or path.resolve() != path:
+            continue
+        try:
+            entry = read_json(path)
+        except FileNotFoundError:
+            continue  # The next scan also observes the durable receipt.
+        if not isinstance(entry, dict):
+            continue
+        if path.parent.name == "receipts":
+            event = entry.get("event")
+            provenance = entry.get("provenance")
+            if not isinstance(event, dict) or not isinstance(event.get("id"), str):
+                continue
+            digest = hashlib.sha256(event["id"].encode()).hexdigest()
+            if (path.stem != digest or entry.get("schemaVersion") != 1
+                    or not isinstance(provenance, dict) or provenance.get("producer") != "SilmarilMacOS"):
+                continue
+            entry = event
+        events.append(entry)
+    return events
+
+
 def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit, managed, version):
     marker = "silmaril-runtime-check:" + secrets.token_hex(16)
     filename = f"qa-{scenario}-{secrets.token_hex(10)}.txt"
@@ -484,7 +519,7 @@ def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit,
     prompt = (f"{marker}.{prompt_tag} Read the note {note.name} using the read tool. "
               "Reply with its contents. If the read is denied or the result is replaced, "
               "stop and quote the displayed reason verbatim.")
-    previous = {p for spool in spool_dirs for p in spool.glob(pattern)}
+    previous = set(evidence_files(spool_dirs, pattern, managed))
     offsets = {p: p.stat().st_size for p in (copilot / "session-state").glob("*/events.jsonl")
                if p.is_file() and p.resolve() == p}
     with create_private_file(note) as f:
@@ -499,8 +534,7 @@ def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit,
             exit_code = chat.poll()
             if exit_code not in (None, 0):
                 raise ValueError(f"Signed editor chat exited with status {exit_code}")
-            evidence = [read_json(p) for d in spool_dirs for p in d.glob(pattern)
-                        if p not in previous and p.is_file() and p.resolve() == p]
+            evidence = fresh_events(evidence_files(spool_dirs, pattern, managed), previous)
             routed = renderer_state(profile, since)
             if routed:
                 history = session_history(copilot, routed, offsets)
