@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import plistlib
 import pwd
+import re
 import secrets
 import shutil
 import signal
@@ -133,8 +134,8 @@ def renderer_state(data, since):
             continue
         with path.open(errors="replace") as stream:
             for line in stream:
-                if f"vscode-chat-session://{ROUTE}/" in line:
-                    resources.add(path)
+                for resource in re.finditer(rf"vscode-chat-session://{ROUTE}/([\w-]+)", line):
+                    resources.add((path, resource.group(1)))
                 marker = "[ChatTTFP] end "
                 if marker not in line:
                     continue
@@ -152,7 +153,21 @@ def renderer_state(data, since):
     row, path = rows[0]
     if row.get("sessionType") != ROUTE or not str(row.get("chatSessionId", "")).startswith(ROUTE + ":/"):
         raise ValueError("Chat executed in the wrong VS Code session type")
-    return row["chatSessionId"].split(":/", 1)[1].strip("/") if path in resources else None
+    workbench_id = row["chatSessionId"].split(":/", 1)[1].strip("/")
+    if not re.fullmatch(r"[\w-]+", workbench_id):
+        raise ValueError("Invalid workbench chat session identifier")
+    # Current VS Code assigns different IDs to the workbench conversation and the Copilot SDK.
+    agent_log = path.parent.parent / "agenthost.log"
+    if agent_log.is_file() and agent_log.resolve() == agent_log:
+        link = re.compile(r"^\S+ \S+ \[info\] \[Copilot:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\] "
+                          rf"Preparing SDK session: kind=(?:create|resume), configuration=ahp-session:/{re.escape(workbench_id)},")
+        with agent_log.open(errors="replace") as stream:
+            sessions = {match.group(1) for line in stream if (match := link.match(line))}
+        if len(sessions) > 1:
+            raise ValueError("Ambiguous Copilot SDK session for the workbench turn")
+        if sessions:
+            return sessions.pop()
+    return workbench_id if (path, workbench_id) in resources else None
 
 
 def read_tool(event):
@@ -436,6 +451,24 @@ def session_history(copilot, session, offsets):
     return rows
 
 
+def managed_turn_evidence(events, history, session, prompt):
+    # Silmaril classifies Copilot's transformed prompt, which can include native context.
+    # Bind the exact submitted prompt and the SDK session before using its transformed text.
+    prompts = set()
+    for row in history:
+        data = row["data"]
+        if row["type"] != "hook.start" or data.get("hookType") != "userPromptTransformed":
+            continue
+        hook = data.get("input")
+        if (isinstance(hook, dict) and hook.get("sessionId") == session and hook.get("prompt") == prompt
+                and isinstance(hook.get("transformedPrompt"), str) and hook["transformedPrompt"]):
+            prompts.add(hook["transformedPrompt"])
+    if len(prompts) != 1:
+        return [], prompt
+    fingerprint = hashlib.sha256(session.encode()).hexdigest()
+    return [e for e in events if e.get("sessionFingerprint") == fingerprint], prompts.pop()
+
+
 def denial_observed(events, history, *, scenario, prompt, marker, version, managed, word):
     boundary, action = DENIALS[scenario]
     producer = "SilmarilHookRuntime" if managed else "VSCodeFirewallPlugin"
@@ -466,7 +499,8 @@ def denial_observed(events, history, *, scenario, prompt, marker, version, manag
         # message must record that replacement without issuing the requested file read.
         if any(r["type"] == "tool.execution_start" for r in history):
             return "FAIL"
-        replaced = any(r["type"] == "user.message" and r["data"].get("content") == BLOCK_MESSAGE for r in history)
+        replaced = any(r["type"] == "user.message" and r["data"].get("transformedContent", r["data"].get("content")) == BLOCK_MESSAGE
+                       for r in history)
         return "PASS" if replaced else None
     # The installed hook and the client must both report the standard denial. The
     # benign prompt asks the model to quote the reason but never supplies that wording.
@@ -538,14 +572,17 @@ def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit,
             routed = renderer_state(profile, since)
             if routed:
                 history = session_history(copilot, routed, offsets)
+                classified_prompt = prompt
+                if managed:
+                    evidence, classified_prompt = managed_turn_evidence(evidence, history, routed, prompt)
                 if scenario == "allow":
-                    allowed = valid_evidence(evidence, prompt=prompt, marker=marker, version=version, managed=managed)
+                    allowed = valid_evidence(evidence, prompt=classified_prompt, marker=marker, version=version, managed=managed)
                     # Verify final customer-visible readback against a value absent from the prompt.
                     if allowed and any(r["type"] == "assistant.message" and not r["data"].get("toolRequests")
                                        and word in str(r["data"].get("content", "")) for r in history):
                         return "PASS"
                 else:
-                    result = denial_observed(evidence, history, scenario=scenario, prompt=prompt, marker=marker,
+                    result = denial_observed(evidence, history, scenario=scenario, prompt=classified_prompt, marker=marker,
                                              version=version, managed=managed, word=word)
                     if result in ("PASS", "FAIL"):
                         return result

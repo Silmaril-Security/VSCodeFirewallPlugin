@@ -118,6 +118,35 @@ class EditorObservationTests(unittest.TestCase):
                 self.assertEqual(checks["live"], "BLOCKED")
                 self.assertEqual(log.getvalue(), f"Editor acceptance failed during {label} (exit 1)\n")
 
+    def test_workbench_turn_requires_its_own_sdk_mapping(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp).resolve()
+            renderer = profile / "logs/launch/window1/renderer.log"
+            renderer.parent.mkdir(parents=True)
+            row = {"interactionKind": "turn", "sessionType": driver.ROUTE,
+                   "chatSessionId": driver.ROUTE + ":/workbench-id", "epochMs": 100}
+            renderer.write_text("[ChatTTFP] end " + json.dumps(row))
+            agent = renderer.parent.parent / "agenthost.log"
+            sdk = "12345678-1234-1234-1234-123456789abc"
+            line = (f"2026-11-22 13:55:19.279 [info] [Copilot:{sdk}] Preparing SDK session: "
+                    "kind=create, configuration=ahp-session:/workbench-id, chat=ahp-chat:/chat-id")
+            agent.write_text(line.replace("workbench-id", "other-workbench-id"))
+            self.assertIsNone(driver.renderer_state(profile, 50))
+            agent.write_text(line)
+            self.assertEqual(driver.renderer_state(profile, 50), sdk)
+            agent.write_text(line + "\n" + line.replace(sdk, "abcdef12" + sdk[8:]))
+            with self.assertRaisesRegex(ValueError, "Ambiguous"):
+                driver.renderer_state(profile, 50)
+
+    def test_managed_prompt_uses_the_native_transform_for_the_exact_submitted_turn(self):
+        event = {"sessionFingerprint": hashlib.sha256(b"sdk-id").hexdigest()}
+        hook = {"sessionId": "sdk-id", "prompt": "original", "transformedPrompt": "native context and original"}
+        history = [{"type": "hook.start", "data": {"hookType": "userPromptTransformed", "input": hook}}]
+        self.assertEqual(driver.managed_turn_evidence([{}, event], history, "sdk-id", "original"),
+                         ([event], "native context and original"))
+        self.assertEqual(driver.managed_turn_evidence([event], history, "other-session", "original")[0], [])
+        self.assertEqual(driver.managed_turn_evidence([event], history, "sdk-id", "other prompt")[0], [])
+
     def test_rendered_route_and_fresh_time_are_required(self):
         with tempfile.TemporaryDirectory() as temp:
             profile = Path(temp).resolve()
