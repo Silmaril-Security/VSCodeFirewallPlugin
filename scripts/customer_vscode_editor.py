@@ -224,7 +224,7 @@ def launch(binary, profile, workspace, env):
         chat_env = {**env, "VSCODE_CLI": "1", "ELECTRON_NO_ATTACH_CONSOLE": "1"}
 
         def submit(prompt):
-            start(["chat", "--reuse-window", "--mode", "agent", prompt], chat_env)
+            return start(["chat", "--reuse-window", "--mode", "agent", prompt], chat_env)
 
         yield submit
 
@@ -391,11 +391,14 @@ def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit,
         f.write(content + "\n")
     try:
         since = time.time() * 1000
-        submit(prompt)
+        chat = submit(prompt)
         deadline = time.monotonic() + 210
         routed = None
         allowed = False
         while time.monotonic() < deadline:
+            exit_code = chat.poll()
+            if exit_code not in (None, 0):
+                raise ValueError(f"Signed editor chat exited with status {exit_code}")
             evidence = [read_json(p) for d in spool_dirs for p in d.glob(pattern)
                         if p not in previous and p.is_file() and p.resolve() == p]
             routed = renderer_state(profile, since)

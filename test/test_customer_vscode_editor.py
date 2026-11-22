@@ -125,6 +125,16 @@ class EditorObservationTests(unittest.TestCase):
                 self.assertEqual(call.kwargs["env"]["HOME"], temp)
                 self.assertEqual(call.kwargs["env"]["VSCODE_CLI"], "1")
 
+    def test_chat_failure_during_observation_is_reported_and_note_removed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            chat = Mock()
+            chat.poll.side_effect = [None, 19]
+            with patch.object(driver.time, "sleep"), self.assertRaisesRegex(ValueError, "exited with status 19"):
+                driver.run_case("allow", workspace, workspace, workspace, [], "*.json",
+                                lambda prompt: chat, True, "0.3.1")
+            self.assertEqual(list(workspace.iterdir()), [])
+
     def test_socket_budget_is_validated_before_launch(self):
         profile = Path("/private/tmp") / ("x" * 100)
         with self.assertRaisesRegex(driver.PhysicalHostUnavailable, "socket path"):
