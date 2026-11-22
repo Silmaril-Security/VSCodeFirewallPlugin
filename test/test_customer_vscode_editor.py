@@ -15,6 +15,37 @@ import customer_vscode_editor as driver
 
 class EditorObservationTests(unittest.TestCase):
 
+    def test_qa_hook_launcher_is_exact_and_scoped_to_the_editor_lifetime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            account, run = root / "account", root / "run"
+            account.mkdir()
+            for managed, path, mode in (
+                (False, ".vscode/silmaril-firewall-node-path", 0o600),
+                (True, "Library/Application Support/Silmaril/Runtime/vscode/SilmarilHookRuntime", 0o755),
+            ):
+                source, target = run / path, account / path
+                source.parent.mkdir(parents=True)
+                source.write_bytes(b"verified payload")
+                source.chmod(mode)
+                with self.assertRaisesRegex(RuntimeError, "turn failed"):
+                    with driver.installed_hook_launcher(account, run, managed):
+                        self.assertEqual(target.read_bytes(), source.read_bytes())
+                        self.assertEqual(target.stat().st_mode & 0o777, mode)
+                        raise RuntimeError("turn failed")
+                self.assertFalse(target.parent.exists())
+                target.parent.mkdir(parents=True)
+                target.write_bytes(source.read_bytes())
+                target.chmod(mode)
+                with driver.installed_hook_launcher(account, run, managed):
+                    pass
+                self.assertTrue(target.exists())
+                target.write_bytes(b"preexisting installation")
+                with self.assertRaises(driver.PhysicalHostUnavailable):
+                    with driver.installed_hook_launcher(account, run, managed):
+                        self.fail("conflicting installation was admitted")
+                self.assertEqual(target.read_bytes(), b"preexisting installation")
+
     def test_private_files_are_owner_only_and_never_overwrite(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "settings.json"

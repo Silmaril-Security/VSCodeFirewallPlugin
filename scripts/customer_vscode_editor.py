@@ -1,5 +1,6 @@
 """Run one ordinary Read through the signed editor and the installed firewall adapter."""
 import contextlib
+import errno
 import hashlib
 import hmac
 import json
@@ -13,6 +14,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import urlsplit
 
@@ -252,6 +254,51 @@ def verify_managed_endpoint(url, key):
                          "Device policy selects a different Test Tenant connection")
 
 
+@contextlib.contextmanager
+def installed_hook_launcher(account_home, home, managed):
+    # The signed hooks resolve this one file through HOME. Leave any existing installation intact.
+    relative = (Path("Library/Application Support/Silmaril/Runtime/vscode/SilmarilHookRuntime")
+                if managed else Path(".vscode/silmaril-firewall-node-path"))
+    source, dest = home / relative, account_home / relative
+    prerequisite(dest.parent.resolve() == dest.parent, "The QA hook launcher directory is redirected")
+    def remove_empty_directory(path):
+        try:
+            path.rmdir()
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                raise
+
+    with contextlib.ExitStack() as cleanup:
+        directory = account_home
+        for part in relative.parent.parts:
+            directory = directory / part
+            try:
+                directory.mkdir(mode=0o700)
+            except FileExistsError:
+                prerequisite(directory.is_dir() and not directory.is_symlink(),
+                             "The QA hook launcher requires real directories")
+            else:
+                cleanup.callback(remove_empty_directory, directory)
+        prerequisite(dest.parent.stat().st_uid == os.getuid(), "The QA account must own the hook launcher directory")
+        # Publish a complete file without replacing a concurrent install, including across filesystems.
+        with tempfile.NamedTemporaryFile(dir=dest.parent) as staged:
+            shutil.copy2(source, staged.name)
+            try:
+                os.link(staged.name, dest)
+            except FileExistsError:
+                prerequisite(not dest.is_symlink() and dest.is_file() and dest.stat().st_uid == os.getuid()
+                             and stat.S_IMODE(dest.stat().st_mode) == stat.S_IMODE(source.stat().st_mode)
+                             and dest.read_bytes() == source.read_bytes(),
+                             "The dedicated QA account has a different hook launcher installed")
+                yield
+            else:
+                try:
+                    yield
+                finally:
+                    if dest.exists() and os.path.samestat(dest.lstat(), os.fstat(staged.fileno())):
+                        dest.unlink()
+
+
 def journey(home, plugin, managed, version, checks):
     account_home, seed, workspace = qa_directories()
     binary = verify_editor(managed)
@@ -271,11 +318,13 @@ def journey(home, plugin, managed, version, checks):
     with create_private_file(config) as f:
         json.dump({"schemaVersion": 1, "enabled": True, "apiKey": key, "apiUrl": url, "mode": "block", "timeoutMs": 8000}, f)
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
-           "HOME": str(home), "USER": pwd.getpwuid(os.getuid()).pw_name, "TMPDIR": str(home),
+           "HOME": str(account_home), "USER": pwd.getpwuid(os.getuid()).pw_name, "TMPDIR": str(home),
            # The chat subcommand rejects --user-data-dir. The CLI and Electron both resolve
            # VSCODE_APPDATA/Code to this run's profile and single-instance socket.
            "VSCODE_APPDATA": str(profile.parent),
-           "SILMARIL_CONFIG_PATH": str(config)}
+           "SILMARIL_CONFIG_PATH": str(config),
+           "SILMARIL_LOCAL_EVENT_DIR": str(home / EVIDENCE),
+           "SILMARIL_VSCODE_WORKSPACE_STATE": str(home / "observed-workspaces.json")}
     if managed:
         env.update(SILMARIL_API_URL=url, SILMARIL_API_KEY=key, SILMARIL_MODE="block")
     spool_dirs = {home / EVIDENCE}
@@ -286,7 +335,8 @@ def journey(home, plugin, managed, version, checks):
     # The signed Copilot Agent Host stores its normal session history under COPILOT_HOME/session-state.
     copilot = home / ".copilot"
     env["COPILOT_HOME"] = str(copilot)
-    with launch(binary, profile, workspace, env) as submit:
+    # macOS keychain discovery and VS Code workspace trust both use the real Aqua login home.
+    with installed_hook_launcher(account_home, home, managed), launch(binary, profile, workspace, env) as submit:
         for scenario in ("allow", *DENIALS):
             try:
                 outcome = run_case(scenario, workspace, profile, copilot, spool_dirs, pattern,
