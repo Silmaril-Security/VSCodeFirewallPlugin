@@ -179,28 +179,41 @@ def valid_evidence(events, *, prompt, marker, version, managed):
     return {"pre_tool", "tool_result"}.issubset(reads)
 
 
+def editor_group_has_live_members(group):
+    # A macOS group containing only zombies can reject both a signal and the signal-0 probe.
+    rows = run("/bin/ps", "-axo", "pgid=,state=").stdout.splitlines()
+    return any(int(pgid) == group and not state.startswith(b"Z")
+               for pgid, state in (row.split() for row in rows))
+
+
 def stop_editor_group(proc, term_timeout=10, kill_timeout=5):
     # The owned group can still contain helpers after its leader exits.
     for sig, timeout in ((signal.SIGTERM, term_timeout), (signal.SIGKILL, kill_timeout)):
+        denied = False
         try:
+            proc.poll()
             try:
                 os.killpg(proc.pid, sig)
             except PermissionError:
-                # Darwin can return EPERM for a group containing only our unreaped zombie.
-                if proc.poll() is None:
-                    raise
-                os.killpg(proc.pid, sig)  # Also terminate any helpers still in this group.
+                denied = True
             deadline = time.monotonic() + timeout
             while True:
-                proc.poll()  # reap our child so it cannot keep the group visible as a zombie
-                os.killpg(proc.pid, 0)
+                proc.poll()
+                if not denied:
+                    try:
+                        os.killpg(proc.pid, 0)
+                    except PermissionError:
+                        denied = True
+                if denied and not editor_group_has_live_members(proc.pid):
+                    proc.wait(timeout=kill_timeout)
+                    return
                 if time.monotonic() >= deadline:
                     break
-                time.sleep(0.05)
+                time.sleep(0.1)
         except ProcessLookupError:
             proc.wait(timeout=kill_timeout)
             return
-    raise ValueError("An owned editor process remained after group termination")
+    raise OSError(errno.EBUSY, "An owned editor process remained after group termination")
 
 
 @contextlib.contextmanager
@@ -526,7 +539,16 @@ def run_editor_checks(home, plugin, managed, version):
                      "/usr/bin/id": "QA account verification"}.get(executable, "editor command")
         print(f"Editor acceptance failed during {operation} (exit {exc.returncode})", file=sys.stderr)
         checks["native"] = "FAIL"
-    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
+    except OSError as exc:
+        frame = exc.__traceback__
+        operation = "editor operation"
+        while frame:
+            if frame.tb_frame.f_globals.get("__name__") == __name__:
+                operation = frame.tb_frame.f_code.co_name
+            frame = frame.tb_next
+        print(f"Editor acceptance failed in {operation} ({type(exc).__name__}, errno {exc.errno})", file=sys.stderr)
+        checks["native"] = "FAIL"
+    except (ValueError, KeyError, subprocess.SubprocessError) as exc:
         print(f"Editor acceptance failed ({type(exc).__name__})", file=sys.stderr)
         checks["native"] = "FAIL"
     return checks
