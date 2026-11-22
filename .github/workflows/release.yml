@@ -187,8 +187,8 @@ jobs:
           python3 _customer/scripts/verify_release.py --receipt "$RUNNER_TEMP/customer-receipt/receipt.json" \
             --product VSCodeFirewallPlugin --source-sha "$GITHUB_SHA" --version "$VERSION" \
             --digest "$digest" --run-id "$GITHUB_RUN_ID" --attempt "$QUALIFIED_ATTEMPT"
-      - name: Preserve the documented 0.3.1 publication hold
-        if: needs.plan.outputs.version == '0.3.1'
+      - name: Preserve the documented 0.3.1 and 0.3.2 publication holds
+        if: needs.plan.outputs.version == '0.3.1' || needs.plan.outputs.version == '0.3.2'
         run: |
           echo "::error::This candidate has an explicit publication hold."
           exit 1

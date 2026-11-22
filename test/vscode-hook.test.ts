@@ -314,6 +314,77 @@ test("dispatch selects one validated nonmixed runtime schema and classifies once
   assert.equal(calls.filter((call) => call.text).length, 2);
 });
 
+test("validated Copilot submitted prompts only observe their workspace once", async () => {
+  const calls: unknown[] = [];
+  const events: unknown[] = [];
+  const observed: Array<{ cwd: unknown; env: unknown }> = [];
+  const deps = {
+    ...dependencies([], events, calls),
+    workspaceObserver: async (cwd: unknown, env: unknown) => {
+      observed.push({ cwd, env });
+    },
+  } as RuntimeDependencies;
+  const submitted = copilotPayload("userPromptSubmitted");
+
+  assert.deepEqual(
+    await runVSCodeCopilotHook("userPromptSubmitted", submitted, BASE_ENV, deps),
+    {},
+  );
+  assert.deepEqual(
+    await dispatchVSCodeHook("userPromptSubmitted", submitted, BASE_ENV, deps),
+    {},
+  );
+  assert.deepEqual(observed, [
+    { cwd: "/tmp/project", env: BASE_ENV },
+    { cwd: "/tmp/project", env: BASE_ENV },
+  ]);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(events, []);
+});
+
+test("Copilot submitted-prompt observation failures and invalid inputs fail open", async () => {
+  const calls: unknown[] = [];
+  const events: unknown[] = [];
+  let invalidObservations = 0;
+  const base = dependencies([], events, calls);
+  assert.deepEqual(
+    await runVSCodeCopilotHook("userPromptSubmitted", copilotPayload("userPromptSubmitted"), BASE_ENV, {
+      ...base,
+      workspaceObserver: () => {
+        throw new Error("synchronous observation failure");
+      },
+    }),
+    {},
+  );
+  assert.deepEqual(
+    await dispatchVSCodeHook("userPromptSubmitted", copilotPayload("userPromptSubmitted"), BASE_ENV, {
+      ...base,
+      workspaceObserver: async () => {
+        throw new Error("asynchronous observation failure");
+      },
+    }),
+    {},
+  );
+  const invalid = { ...copilotPayload("userPromptSubmitted"), cwd: 123 };
+  const invalidDeps = {
+    ...base,
+    workspaceObserver: async () => {
+      invalidObservations += 1;
+    },
+  };
+  assert.deepEqual(
+    await runVSCodeCopilotHook("userPromptSubmitted", invalid, BASE_ENV, invalidDeps),
+    {},
+  );
+  assert.deepEqual(
+    await dispatchVSCodeHook("userPromptSubmitted", invalid, BASE_ENV, invalidDeps),
+    {},
+  );
+  assert.equal(invalidObservations, 0);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(events, []);
+});
+
 test("request IDs preserve transformed Copilot identity and Local tool IDs", async () => {
   const calls: any[] = [];
   const deps = dependencies(
@@ -969,7 +1040,15 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     new URL("../scripts/run-hook.sh", import.meta.url),
     "utf8",
   );
-  assert.equal(packageJson.version, "0.3.1");
+  const releaseWorkflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const customerAcceptance = await readFile(
+    new URL("../scripts/customer-published-acceptance", import.meta.url),
+    "utf8",
+  );
+  assert.equal(packageJson.version, "0.3.2");
   assert.equal(pluginJson.$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
   assert.equal(pluginJson.name, "silmaril-vscode-firewall");
   assert.equal(pluginJson.version, packageJson.version);
@@ -995,6 +1074,9 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
   assert.match(launcher, /\[ -L "\$\{runtime_file\}" \]/u);
   assert.match(launcher, /\[ -L "\$\{node_path\}" \]/u);
   assert.match(launcher, /"\$@"/u);
+  assert.match(releaseWorkflow, /needs\.plan\.outputs\.version == '0\.3\.1'/u);
+  assert.match(releaseWorkflow, /needs\.plan\.outputs\.version == '0\.3\.2'/u);
+  assert.match(customerAcceptance, /version in \("0\.3\.1", "0\.3\.2"\)/u);
 });
 
 test("private launcher safely handles plugin paths with spaces and both CLI forms", async () => {

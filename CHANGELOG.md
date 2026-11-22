@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 - Unreleased
+
+- Record the supplied workspace for validated shared Copilot
+  `userPromptSubmitted` callbacks in both direct and dispatcher paths.
+- Keep submitted-prompt callbacks classification-free and fail open when
+  workspace observation fails.
+- Supersede the unreleased 0.3.1 candidate and carry its publication hold.
+
 ## 0.3.1 - Unreleased
 
 - Keep the submitted-prompt registration for VS Code Local, while shared

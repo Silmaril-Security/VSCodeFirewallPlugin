@@ -879,7 +879,7 @@ export async function inspectCandidate(destination) {
   const pluginJson = JSON.parse(
     await readFile(path.join(destination, "plugin.json"), "utf8"),
   );
-  assert.equal(packageJson.version, "0.3.1");
+  assert.equal(packageJson.version, "0.3.2");
   assert.equal(pluginJson.version, packageJson.version);
   return {
     version: packageJson.version,
