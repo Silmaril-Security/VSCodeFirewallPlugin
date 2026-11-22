@@ -365,13 +365,18 @@ def installed_hook_launcher(account_home, home, managed):
                         dest.unlink()
 
 
-def journey(home, plugin, managed, version, checks):
+def journey(home, plugin, managed, version, checks, *, controlled=None):
     account_home, seed, workspace = qa_directories()
     binary = verify_editor(managed)
     profile = home / DATA
     stage_profile(seed, profile, plugin)
-    url = os.environ.get("CUSTOMER_NATIVE_API_URL", "")
-    key = os.environ.get("CUSTOMER_NATIVE_API_KEY", "")
+    if controlled:
+        fixture, url = controlled
+        key = fixture.key
+    else:
+        fixture = None
+        url = os.environ.get("CUSTOMER_NATIVE_API_URL", "")
+        key = os.environ.get("CUSTOMER_NATIVE_API_KEY", "")
     target = urlsplit(url)
     prerequisite(target.scheme == "https" and target.hostname and not target.username and not target.password and key,
                  "A dedicated HTTPS Test Tenant endpoint and key are required")
@@ -404,10 +409,10 @@ def journey(home, plugin, managed, version, checks):
     # macOS keychain discovery and VS Code workspace trust both use the real Aqua login home.
     cache = contextlib.nullcontext() if managed else standalone_name_cache(account_home)
     with cache, installed_hook_launcher(account_home, home, managed), launch(binary, profile, workspace, env) as submit:
-        for scenario in ("allow", *DENIALS):
+        for scenario in (("allow", *DENIALS) if fixture else ("allow",)):
             try:
                 outcome = run_case(scenario, workspace, profile, copilot, spool_dirs, pattern,
-                                   submit, managed, version)
+                                   submit, managed, version, fixture)
             except PhysicalHostUnavailable as exc:
                 print(str(exc), file=sys.stderr)
                 outcome = "BLOCKED"
@@ -416,15 +421,14 @@ def journey(home, plugin, managed, version, checks):
                 outcome = "FAIL"
             if scenario == "allow":
                 checks["native"] = outcome
-                checks["live"] = outcome
+                if not fixture:
+                    checks["live"] = outcome
                 if outcome != "PASS":
                     return
                 checks["install"] = "PASS"
             else:
                 checks[scenario] = outcome
-        observed = [checks[scenario] for scenario in DENIALS]
-        checks["policy_denial"] = ("FAIL" if "FAIL" in observed else
-                                   "PASS" if all(s == "PASS" for s in observed) else "BLOCKED")
+
 
 
 def session_history(copilot, session, offsets):
@@ -540,16 +544,18 @@ def fresh_events(paths, previous):
     return events
 
 
-def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit, managed, version):
+def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit, managed, version, fixture=None):
     marker = "silmaril-runtime-check:" + secrets.token_hex(16)
     filename = f"qa-{scenario}-{secrets.token_hex(10)}.txt"
     note = workspace / filename
     word = secrets.token_hex(16)
-    name = scenario.replace("_", "-")
     prompt_tag = " RELEASE-QA-PROMPT-DENY." if scenario == "prompt_denial" else ""
     if scenario == "pre_tool_denial":
         note = workspace / ("RELEASE-QA-READ-DENY-" + filename)
     content = ("RELEASE-QA-RESULT-DENY " if scenario == "post_tool_denial" else "") + word
+    if fixture:
+        fixture.arm(scenario, {"prompt_denial": marker, "pre_tool_denial": note.name,
+                               "post_tool_denial": word}.get(scenario, marker))
     prompt = (f"{marker}.{prompt_tag} Read the note {note.name} using the read tool. "
               "Reply with its contents. If the read is denied or the result is replaced, "
               "stop and quote the displayed reason verbatim.")
@@ -584,14 +590,16 @@ def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit,
                 else:
                     result = denial_observed(evidence, history, scenario=scenario, prompt=classified_prompt, marker=marker,
                                              version=version, managed=managed, word=word)
+                    if result == "PASS" and not fixture.denied(routed):
+                        return "FAIL"
                     if result in ("PASS", "FAIL"):
                         return result
                     if result == "BLOCKED" and history:
-                        raise PhysicalHostUnavailable(f"{name}: Test Tenant did not supply the controlled policy denial")
+                        return "FAIL"
             time.sleep(1)
         if routed and scenario == "allow" and not allowed:
             raise ValueError("Signed editor completed but its plugin did not observe the permitted read")
-        raise PhysicalHostUnavailable(f"{name}: shared turn, signed-client reply or required native effect unobserved")
+        raise PhysicalHostUnavailable(f"{scenario}: shared turn, signed-client reply or required native effect unobserved")
     finally:
         note.unlink(missing_ok=True)
 
@@ -600,6 +608,17 @@ def run_editor_checks(home, plugin, managed, version):
     checks = dict.fromkeys(("install", "native", "live", "policy_denial", *DENIALS), "BLOCKED")
     try:
         journey(home, plugin, managed, version, checks)
+        if checks["live"] == "PASS":
+            from customer_vscode_denials import published_denials
+            try:
+                checks.update(published_denials(home, managed, version))
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+                print(f"Controlled denial journey failed ({type(exc).__name__})", file=sys.stderr)
+                checks["policy_denial"] = "FAIL"
+            else:
+                values = [checks[name] for name in DENIALS]
+                checks["policy_denial"] = ("FAIL" if "FAIL" in values else
+                                          "PASS" if all(value == "PASS" for value in values) else "BLOCKED")
     except PhysicalHostUnavailable as exc:
         print(str(exc), file=sys.stderr)
     except subprocess.CalledProcessError as exc:
