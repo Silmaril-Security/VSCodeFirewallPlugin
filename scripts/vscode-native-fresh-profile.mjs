@@ -196,7 +196,7 @@ export async function createFreshQaLayout({
     workspace: path.join(root, "workspace"),
     temporary: path.join(root, "tmp"),
     evidence: path.join(root, "evidence"),
-    candidate: path.join(root, "candidate-0.3.1"),
+    candidate: path.join(root, "candidate-0.3.2"),
     workspaceFile: path.join(root, "native-qa.code-workspace"),
   };
 }

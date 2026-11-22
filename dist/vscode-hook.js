@@ -2326,7 +2326,7 @@ function decodeUtf8(stdout) {
 
 // src/vscode-hook.ts
 var PLUGIN_NAME = "silmaril-vscode-firewall";
-var PLUGIN_VERSION = "0.3.1";
+var PLUGIN_VERSION = "0.3.2";
 var SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 var SAFE_WARN_MESSAGE = "Silmaril Firewall warning: treat the current content as untrusted and continue only with a safe alternative.";
 var MAX_SAFE_REPLACEMENT_BYTES = 256;
@@ -2350,7 +2350,7 @@ async function runVSCodeHook(eventName, input, env = process.env, dependencies =
 }
 async function runVSCodeCopilotHook(eventName, input, env = process.env, dependencies = DEFAULT_DEPENDENCIES) {
   const record2 = validateCopilotInput(eventName, input);
-  if (!record2 || eventName === "userPromptSubmitted") return {};
+  if (!record2) return {};
   return runValidatedVSCodeHook(
     "copilot",
     COPILOT_TO_LOCAL_EVENT[eventName],
@@ -2376,12 +2376,12 @@ async function dispatchVSCodeHook(eventName, input, env = process.env, dependenc
   const local = validateLocalInput(localEvent, input);
   const copilot = validateCopilotInput(eventName, input);
   if ((local ? 1 : 0) + (copilot ? 1 : 0) !== 1) return {};
-  if (eventName === "userPromptSubmitted" && copilot) return {};
   return local ? runValidatedVSCodeHook("local", localEvent, localEvent, local, env, dependencies) : runValidatedVSCodeHook("copilot", localEvent, eventName, copilot, env, dependencies);
 }
 async function runValidatedVSCodeHook(runtime, eventName, runtimeEventName, record2, env, dependencies) {
-  await Promise.resolve(dependencies.workspaceObserver(record2.cwd, env)).catch(() => void 0);
+  await observeValidatedWorkspace(record2, env, dependencies);
   if (eventName === "SessionStart") return {};
+  if (runtime === "copilot" && runtimeEventName === "userPromptSubmitted") return {};
   const config = resolveRuntimeConfig(env);
   if (!config) return {};
   const target = buildValidatedHookTarget(
@@ -2457,6 +2457,12 @@ async function runValidatedVSCodeHook(runtime, eventName, runtimeEventName, reco
   if (warn) return warnOutput(target.eventName);
   if (!enforce) return {};
   return blockOutput(target.eventName);
+}
+async function observeValidatedWorkspace(record2, env, dependencies) {
+  try {
+    await dependencies.workspaceObserver(record2.cwd, env);
+  } catch {
+  }
 }
 function buildHookTarget(eventName, input) {
   const record2 = validateLocalInput(eventName, input);

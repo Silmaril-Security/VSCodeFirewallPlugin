@@ -2,13 +2,14 @@
 
 Silmaril Firewall protection for Local and shared Copilot agent sessions in Visual Studio Code.
 
-Plugin version 0.3.1 uses the Agent Plugins 1.0 package format and exact
+Plugin version 0.3.2 uses the Agent Plugins 1.0 package format and exact
 `@silmaril-security/sdk` 0.8.2. The single active hook manifest registers the
 camelCase events `sessionStart`, `userPromptSubmitted`,
 `userPromptTransformed`, `preToolUse`, and `postToolUse`.
 `userPromptSubmitted` remains registered because VS Code Local delivers its
 `UserPromptSubmit` payload through that alias. A shared Copilot
-`userPromptSubmitted` callback returns `{}` without classification; shared
+`userPromptSubmitted` callback records its validated workspace and returns `{}`
+without classification; shared
 prompt classification occurs only at `userPromptTransformed`, avoiding a
 duplicate primary-prompt scan. The launcher calls an explicit dispatcher that
 validates and selects exactly one schema. The
@@ -35,7 +36,8 @@ successful tool-result text without reading transcripts.
 ## Requirements
 
 Release [v0.3.0](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.0)
-remains immutable. Current source is the unreleased 0.3.1 candidate.
+remains immutable. Current source is the unreleased 0.3.2 candidate, which
+supersedes the unreleased 0.3.1 candidate and carries its publication hold.
 Installation remains a managed local macOS operation owned by SilmarilMacOS,
 whose separately hashed adapter manifest invokes the signed Silmaril runtime.
 That managed adapter must implement the same event contract but is not
@@ -45,7 +47,7 @@ VS Code Marketplace or npm distribution, and checking it out does not qualify
 direct GUI, remote, or native-host protection.
 
 SilmarilMacOS manages local installation and configuration. Plugin 0.3.0
-retains its historical requirements. Candidate 0.3.1 requires macOS, Node.js 22
+retains its historical requirements. Candidate 0.3.2 requires macOS, Node.js 22
 or newer, and VS Code 1.145.2 or newer; managed admission must reject every
 earlier version without changing the existing protection state. Version
 1.145.2 is the conservative source target and security-admission floor, not a
@@ -53,14 +55,15 @@ qualified supported floor or a claim that it is the earliest possible upstream
 version. Signed VS Code 1.141.1 lacks the required transformed-prompt and
 post-tool replacement contracts and is not qualified.
 
-The exact signed 1.145.2 native matrix has run and **failed**. Its built-in
-Local route blocked the main malicious agent prompt and denied pre-tool
-execution, but a title-generation model request sent the blocked prompt before
-`UserPromptSubmit`, and the raw blocked post-tool result reached the next dummy
-model request. The shared Agent Host replacement contracts remain source-only
+The exact signed 1.145.2 native matrix ran against the superseded 0.3.1
+candidate and **failed**. Its built-in Local route blocked the main malicious
+agent prompt and denied pre-tool execution, but a title-generation model
+request sent the blocked prompt before `UserPromptSubmit`, and the raw blocked
+post-tool result reached the next dummy model request. No native host test has
+run for 0.3.2. The shared Agent Host replacement contracts remain source-only
 and unqualified until a supported shared route exercises them. No universal
 title-confidentiality or native protection claim follows from the current
-source checks, and candidate 0.3.1 must not be published on this evidence.
+source checks, and candidate 0.3.2 must not be published on this evidence.
 
 Native QA receipt `pass` is scoped only to the four-case allow, prompt-block,
 pre-tool-block, and post-tool-block core. Every receipt separately keeps full
@@ -68,7 +71,7 @@ release qualification `incomplete`, batch/resume `unsupported`, and native
 Warn/Shadow `unassessed`. The shared route remains `unverified` unless every
 required classifier callback has exact `copilot` runtime metadata and its
 corresponding `userPromptTransformed`, `preToolUse`, or `postToolUse` event.
-Neither source preflight nor a four-case core pass qualifies 0.3.1 for
+Neither source preflight nor a four-case core pass qualifies 0.3.2 for
 publication.
 
 The manifest uses the portable `command` field, but `scripts/run-hook.sh`
@@ -105,7 +108,8 @@ Every registered event records a provided, resolvable absolute `cwd` in a bounde
 
 `sessionStart` only records the bounded workspace observation and returns `{}`.
 Local submitted prompts and shared transformed prompts classify exactly once.
-A valid shared submitted-prompt callback returns `{}` without classification.
+A valid shared submitted-prompt callback records its bounded workspace
+observation once and returns `{}` without classification.
 The transformed prompt is classified byte-for-byte, including leading,
 trailing, and empty content; empty non-transformed content is skipped.
 
@@ -125,8 +129,8 @@ The candidate implements the following shared Copilot command-hook source
 contract. It remains unqualified until a supported shared Agent Host route
 exercises it:
 
-- `userPromptSubmitted` returns `{}` without classification. The registration
-  remains solely for Local compatibility.
+- `userPromptSubmitted` records its validated workspace once and returns `{}`
+  without classification. The registration also preserves Local compatibility.
 - `userPromptTransformed` Block returns only `modifiedTransformedPrompt` with
   the fixed safe block message. It replaces model-facing content and never
   claims to reject the turn. Warn, Shadow, benign results, and failures return
@@ -170,12 +174,12 @@ The configured timeout bounds the entire classification, including throttling re
 
 ## Provenance and local evidence
 
-Classify metadata `silmaril.provenance` is schema version 1, harness `vscode`, the configured `endpoint_id` when it is a UUID version 4, and `device_name` when a sanitized Mac ComputerName is available. A failed or invalid ComputerName lookup is omitted and classification continues. The SDK records `sdk_language` `typescript`, `sdk_version` `0.8.2`, and the stable hook request ID next to that provenance. Local evidence stores fingerprints, decision availability, bounded risk metadata, runtime-native action (`block_returned`, `content_replaced`, warning context, or allowed), and provenance producer `VSCodeFirewallPlugin` at plugin version 0.3.1. This distinguishes a pre-tool native denial from prompt/tool-result model-facing content replacement. Local evidence omits raw prompts, tool arguments, results, responses, credentials, and the computer name. Events are written under `~/Library/Application Support/Silmaril/Evidence/incoming`, or `SILMARIL_LOCAL_EVENT_DIR`, or `SILMARIL_EVIDENCE_ROOT/incoming`. VS Code's own Agent Debug logs remain host-owned behavior.
+Classify metadata `silmaril.provenance` is schema version 1, harness `vscode`, the configured `endpoint_id` when it is a UUID version 4, and `device_name` when a sanitized Mac ComputerName is available. A failed or invalid ComputerName lookup is omitted and classification continues. The SDK records `sdk_language` `typescript`, `sdk_version` `0.8.2`, and the stable hook request ID next to that provenance. Local evidence stores fingerprints, decision availability, bounded risk metadata, runtime-native action (`block_returned`, `content_replaced`, warning context, or allowed), and provenance producer `VSCodeFirewallPlugin` at plugin version 0.3.2. This distinguishes a pre-tool native denial from prompt/tool-result model-facing content replacement. Local evidence omits raw prompts, tool arguments, results, responses, credentials, and the computer name. Events are written under `~/Library/Application Support/Silmaril/Evidence/incoming`, or `SILMARIL_LOCAL_EVENT_DIR`, or `SILMARIL_EVIDENCE_ROOT/incoming`. VS Code's own Agent Debug logs remain host-owned behavior.
 
 ## Develop
 
 The npm package `@silmaril/vscode-firewall-plugin` is private. `plugin.json`
-name is `silmaril-vscode-firewall` at version 0.3.1, the same version as
+name is `silmaril-vscode-firewall` at version 0.3.2, the same version as
 `package.json` and `PLUGIN_VERSION`. The committed bundle includes SDK 0.8.2;
 its bundled license is reproduced in `THIRD_PARTY_LICENSES.md`.
 
@@ -210,7 +214,7 @@ Code's ephemeral in-memory secret storage. No native pass has been recorded.
 The public native command is preflight-only by default; its optional human
 workflow requires a new owned synthetic root, an explicit one-launch gate, and
 three contained markers for normal trust and the source-verified two-phase
-Extensions UI setup. Do not publish 0.3.1 or propagate a supported-floor claim
+Extensions UI setup. Do not publish 0.3.2 or propagate a supported-floor claim
 until a reviewed native matrix passes without weakening the title-request or
 post-tool-result oracles. Do not claim byte identity between the standalone
 and managed delivery forms. Do not modify or relabel the existing 0.3.0

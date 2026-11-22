@@ -129,7 +129,7 @@ def run(checks):
         require(json.loads((plugin / "plugin.json").read_text())["version"] == version,
                 "Installed adapter version differs")
         checks["payload_install"] = "PASS"
-        if not owner and version == "0.3.1":
+        if not owner and version in ("0.3.1", "0.3.2"):
             checks["publication_hold"] = "BLOCKED"
         from customer_vscode_editor import run_editor_checks
         checks.update(run_editor_checks(home, plugin, bool(owner), version))
