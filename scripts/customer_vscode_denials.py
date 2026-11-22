@@ -44,8 +44,10 @@ class Decisions:
         hook, text = payload.get("hook"), payload.get("text")
         metadata = payload.get("metadata", {})
         session = metadata.get("conversationId")
+        tool = str(payload.get("tool_name", "")).lower().replace("_", "").replace(" ", "")
         with self.lock:
             deny = (self.hook is not None and isinstance(hook, str) and self.hook == hook.lower() and isinstance(text, str)
+                    and (self.hook == "user_input" or tool in {"read", "readfile", "view"})
                     and self.marker in text and isinstance(session, str) and bool(session))
             if deny:
                 self.sessions.add(session)

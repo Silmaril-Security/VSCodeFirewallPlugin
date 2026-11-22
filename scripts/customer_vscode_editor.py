@@ -599,7 +599,7 @@ def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit,
             time.sleep(1)
         if routed and scenario == "allow" and not allowed:
             raise ValueError("Signed editor completed but its plugin did not observe the permitted read")
-        raise PhysicalHostUnavailable(f"{name}: shared turn, signed-client reply or required native effect unobserved")
+        raise PhysicalHostUnavailable(f"{scenario}: shared turn, signed-client reply or required native effect unobserved")
     finally:
         note.unlink(missing_ok=True)
 

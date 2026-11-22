@@ -14,7 +14,7 @@ class ControlledDenials(unittest.TestCase):
                 decisions = Decisions()
                 decisions.arm(scenario, "unique-file")
                 payload = {"text": "Read unique-file", "metadata": {"conversationId": "signed-session"},
-                           "hook": hook}
+                           "hook": hook, "tool_name": "view"}
                 for changed in ({"text": "another file"}, {"hook": "OTHER"}, {"metadata": {}}):
                     self.assertEqual(decisions.classify({**payload, **changed})["prediction"], "BENIGN")
                 self.assertFalse(decisions.denied("signed-session"))
