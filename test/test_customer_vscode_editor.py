@@ -66,6 +66,35 @@ class EditorObservationTests(unittest.TestCase):
             self.assertEqual(cache.stat().st_ino, original.st_ino)
             self.assertEqual(list(cache.parent.iterdir()), [cache])
 
+    def test_ingested_runtime_receipt_survives_spool_cleanup_and_preserves_event_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            incoming, receipts = root / "incoming", root / "receipts"
+            incoming.mkdir()
+            receipts.mkdir()
+            event = {"id": "runtime:test", "hook": "pre_tool"}
+            raw = incoming / "runtime-test.json"
+            raw.write_text(json.dumps(event))
+            receipt = {"event": event, "provenance": {"producer": "SilmarilMacOS"}, "schemaVersion": 1}
+            path = receipts / (hashlib.sha256(event["id"].encode()).hexdigest() + ".json")
+            path.write_text(json.dumps(receipt))
+            (receipts / "unrelated.json").write_text(json.dumps(receipt))
+            observed = list(driver.evidence_files([incoming], "runtime-*.json", True))
+            raw.unlink()
+            self.assertEqual(driver.fresh_events(observed, set()), [event])
+            self.assertEqual(driver.fresh_events(observed, {path}), [])
+            self.assertEqual(list(driver.evidence_files([incoming], "event-*.json", False)), [])
+
+    def test_managed_shadow_blocks_only_the_correlated_turn(self):
+        prompt = "unique QA read"
+        event = {"schemaVersion": 1, "host": "vscode", "hook": "user_input", "mode": "shadow",
+                 "provenance": {"pluginVersion": "0.3.1", "producer": "SilmarilHookRuntime"},
+                 "requestFingerprint": hashlib.sha256(prompt.encode()).hexdigest(), "sessionFingerprint": "fresh"}
+        args = dict(marker="marker", version="0.3.1", managed=True)
+        self.assertFalse(driver.valid_evidence([event], prompt="unrelated", **args))
+        with self.assertRaisesRegex(driver.PhysicalHostUnavailable, "shadow mode"):
+            driver.valid_evidence([event], prompt=prompt, **args)
+
     def test_private_files_are_owner_only_and_never_overwrite(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "settings.json"
