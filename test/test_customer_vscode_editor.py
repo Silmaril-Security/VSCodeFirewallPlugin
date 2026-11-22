@@ -103,8 +103,30 @@ class EditorObservationTests(unittest.TestCase):
         self.assertEqual(calls, [driver.signal.SIGTERM, 0, driver.signal.SIGKILL, 0])
         proc.wait.assert_called_once()
 
+    def test_blocked_editor_turn_cleans_up_each_signed_app_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp)
+            renderer = profile / "logs" / "today" / "window1" / "renderer.log"
+            renderer.parent.mkdir(parents=True)
+            renderer.write_text("Started local extension host with pid 123")
+            editor, first_chat, second_chat = Mock(), Mock(), Mock()
+            editor.poll.return_value = None
+            with patch.object(subprocess, "Popen", side_effect=[editor, first_chat, second_chat]) as popen, \
+                 patch.object(driver, "stop_editor_group") as stop:
+                with self.assertRaises(driver.PhysicalHostUnavailable):
+                    with driver.launch("/signed/Code", profile, profile, {"HOME": temp}) as submit:
+                        submit("first")
+                        submit("second")
+                        raise driver.PhysicalHostUnavailable("no signed reply")
+            self.assertEqual([call.args[0] for call in stop.call_args_list], [second_chat, first_chat, editor])
+            for call, prompt in zip(popen.call_args_list[1:], ["first", "second"]):
+                self.assertEqual(call.args[0], ["/signed/Code", "chat", "--reuse-window", "--mode", "agent", prompt])
+                self.assertTrue(call.kwargs["start_new_session"])
+                self.assertEqual(call.kwargs["env"]["HOME"], temp)
+                self.assertEqual(call.kwargs["env"]["VSCODE_CLI"], "1")
+
     def test_socket_budget_is_validated_before_launch(self):
         profile = Path("/private/tmp") / ("x" * 100)
         with self.assertRaisesRegex(driver.PhysicalHostUnavailable, "socket path"):
-            with driver.launch(None, None, profile, None, {}):
+            with driver.launch(None, profile, None, {}):
                 self.fail("oversized socket should prevent launching the editor")
