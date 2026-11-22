@@ -183,7 +183,13 @@ def stop_editor_group(proc, term_timeout=10, kill_timeout=5):
     # The owned group can still contain helpers after its leader exits.
     for sig, timeout in ((signal.SIGTERM, term_timeout), (signal.SIGKILL, kill_timeout)):
         try:
-            os.killpg(proc.pid, sig)
+            try:
+                os.killpg(proc.pid, sig)
+            except PermissionError:
+                # Darwin can return EPERM for a group containing only our unreaped zombie.
+                if proc.poll() is None:
+                    raise
+                os.killpg(proc.pid, sig)  # Also terminate any helpers still in this group.
             deadline = time.monotonic() + timeout
             while True:
                 proc.poll()  # reap our child so it cannot keep the group visible as a zombie
