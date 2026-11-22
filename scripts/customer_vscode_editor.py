@@ -92,7 +92,7 @@ def verify_editor(managed):
         rule = '=anchor apple generic and identifier "com.microsoft.VSCode" and certificate leaf[subject.OU] = "UBF8T346G9"'
         run("/usr/bin/codesign", "--verify", "--strict", "-R", rule, app)
         run("/usr/sbin/spctl", "--assess", "--type", "execute", app)
-        return app / "Contents/MacOS" / info["CFBundleExecutable"], app / "Contents/Resources/app/bin/code"
+        return app / "Contents/MacOS" / info["CFBundleExecutable"]
     raise PhysicalHostUnavailable(f"Provision signed Microsoft VS Code {version} in /Applications")
 
 
@@ -196,14 +196,20 @@ def stop_editor_group(proc, term_timeout=10, kill_timeout=5):
 
 
 @contextlib.contextmanager
-def launch(binary, cli, profile, workspace, env):
+def launch(binary, profile, workspace, env):
     prerequisite(len(os.fsencode(profile / "1.14-main.sock")) <= 103,
                  "The private editor socket path exceeds the macOS byte limit")
     flags = [f"--user-data-dir={profile}", f"--extensions-dir={profile.parent / 'qa-extensions'}"]
-    proc = subprocess.Popen([binary, *flags, "--new-window", "--skip-welcome", "--skip-release-notes",
-                             "--log", "trace", workspace], env=env, cwd=workspace, start_new_session=True,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
+    with contextlib.ExitStack() as cleanup:
+        def start(arguments, environment):
+            process = subprocess.Popen([binary, *arguments], env=environment, cwd=workspace,
+                                       start_new_session=True, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cleanup.callback(stop_editor_group, process)
+            return process
+
+        proc = start([*flags, "--new-window", "--skip-welcome", "--skip-release-notes",
+                      "--log", "trace", workspace], env)
         deadline = time.monotonic() + 100
         while time.monotonic() < deadline:
             prerequisite(proc.poll() is None, "Signed editor exited during launch")
@@ -213,9 +219,14 @@ def launch(binary, cli, profile, workspace, env):
             time.sleep(1)
         else:
             raise PhysicalHostUnavailable("The signed editor did not open an Aqua window")
-        yield lambda prompt: run(cli, "chat", "--reuse-window", "--mode", "agent", prompt, env=env, cwd=workspace)
-    finally:
-        stop_editor_group(proc)
+        # On macOS the code CLI passes these arguments to the signed app via
+        # open -n. Launch it directly so we own the chat process and its helpers.
+        chat_env = {**env, "VSCODE_CLI": "1", "ELECTRON_NO_ATTACH_CONSOLE": "1"}
+
+        def submit(prompt):
+            return start(["chat", "--reuse-window", "--mode", "agent", prompt], chat_env)
+
+        yield submit
 
 
 def verify_managed_endpoint(url, key):
@@ -243,7 +254,7 @@ def verify_managed_endpoint(url, key):
 
 def journey(home, plugin, managed, version, checks):
     account_home, seed, workspace = qa_directories()
-    binary, cli = verify_editor(managed)
+    binary = verify_editor(managed)
     profile = home / DATA
     stage_profile(seed, profile, plugin)
     url = os.environ.get("CUSTOMER_NATIVE_API_URL", "")
@@ -275,7 +286,7 @@ def journey(home, plugin, managed, version, checks):
     # The signed Copilot Agent Host stores its normal session history under COPILOT_HOME/session-state.
     copilot = home / ".copilot"
     env["COPILOT_HOME"] = str(copilot)
-    with launch(binary, cli, profile, workspace, env) as submit:
+    with launch(binary, profile, workspace, env) as submit:
         for scenario in ("allow", *DENIALS):
             try:
                 outcome = run_case(scenario, workspace, profile, copilot, spool_dirs, pattern,
@@ -380,11 +391,14 @@ def run_case(scenario, workspace, profile, copilot, spool_dirs, pattern, submit,
         f.write(content + "\n")
     try:
         since = time.time() * 1000
-        submit(prompt)
+        chat = submit(prompt)
         deadline = time.monotonic() + 210
         routed = None
         allowed = False
         while time.monotonic() < deadline:
+            exit_code = chat.poll()
+            if exit_code not in (None, 0):
+                raise ValueError(f"Signed editor chat exited with status {exit_code}")
             evidence = [read_json(p) for d in spool_dirs for p in d.glob(pattern)
                         if p not in previous and p.is_file() and p.resolve() == p]
             routed = renderer_state(profile, since)
