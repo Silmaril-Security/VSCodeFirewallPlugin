@@ -154,6 +154,22 @@ class EditorObservationTests(unittest.TestCase):
         self.assertEqual(calls, [driver.signal.SIGTERM, 0, driver.signal.SIGKILL, 0])
         proc.wait.assert_called_once()
 
+    def test_cleanup_reaps_zombie_and_checks_its_group_again(self):
+        proc = Mock(pid=12345)
+        proc.poll.return_value = 0
+        with patch.object(driver.os, "killpg", side_effect=[PermissionError(), ProcessLookupError()]) as kill:
+            driver.stop_editor_group(proc)
+        self.assertEqual([c.args for c in kill.call_args_list], [(12345, driver.signal.SIGTERM)] * 2)
+        proc.wait.assert_called_once()
+
+    def test_cleanup_preserves_permission_errors_for_live_processes(self):
+        proc = Mock(pid=12345)
+        proc.poll.return_value = None
+        with patch.object(driver.os, "killpg", side_effect=PermissionError()) as kill:
+            with self.assertRaises(PermissionError):
+                driver.stop_editor_group(proc)
+        kill.assert_called_once_with(12345, driver.signal.SIGTERM)
+
     def test_blocked_editor_turn_cleans_up_each_signed_app_launch(self):
         with tempfile.TemporaryDirectory() as temp:
             profile = Path(temp)
