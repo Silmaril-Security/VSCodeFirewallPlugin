@@ -154,21 +154,23 @@ class EditorObservationTests(unittest.TestCase):
         self.assertEqual(calls, [driver.signal.SIGTERM, 0, driver.signal.SIGKILL, 0])
         proc.wait.assert_called_once()
 
-    def test_cleanup_reaps_zombie_and_checks_its_group_again(self):
+    def test_permission_denied_group_must_be_gone_or_entirely_defunct(self):
         proc = Mock(pid=12345)
-        proc.poll.return_value = 0
-        with patch.object(driver.os, "killpg", side_effect=[PermissionError(), ProcessLookupError()]) as kill:
-            driver.stop_editor_group(proc)
-        self.assertEqual([c.args for c in kill.call_args_list], [(12345, driver.signal.SIGTERM)] * 2)
-        proc.wait.assert_called_once()
-
-    def test_cleanup_preserves_permission_errors_for_live_processes(self):
-        proc = Mock(pid=12345)
-        proc.poll.return_value = None
-        with patch.object(driver.os, "killpg", side_effect=PermissionError()) as kill:
-            with self.assertRaises(PermissionError):
+        rows = b"12345 Z+\n6789 S\n"
+        for responses in ([PermissionError()], [None, PermissionError()]):
+            with patch.object(driver.os, "killpg", side_effect=responses), \
+                 patch.object(driver, "run", return_value=Mock(stdout=rows)):
                 driver.stop_editor_group(proc)
-        kill.assert_called_once_with(12345, driver.signal.SIGTERM)
+        self.assertEqual(proc.wait.call_count, 2)
+
+    def test_permission_denied_live_helper_still_fails_cleanup(self):
+        proc = Mock(pid=12345)
+        rows = b"12345 Z\n12345 S\n"
+        with patch.object(driver.os, "killpg", side_effect=PermissionError()), \
+             patch.object(driver, "run", return_value=Mock(stdout=rows)):
+            with self.assertRaisesRegex(OSError, "remained after group termination"):
+                driver.stop_editor_group(proc, term_timeout=0, kill_timeout=0)
+        proc.wait.assert_not_called()
 
     def test_blocked_editor_turn_cleans_up_each_signed_app_launch(self):
         with tempfile.TemporaryDirectory() as temp:
