@@ -46,6 +46,26 @@ class EditorObservationTests(unittest.TestCase):
                         self.fail("conflicting installation was admitted")
                 self.assertEqual(target.read_bytes(), b"preexisting installation")
 
+    def test_standalone_computer_name_cache_restored_after_a_hook_refresh(self):
+        with tempfile.TemporaryDirectory() as temp:
+            account = Path(temp).resolve()
+            cache = account / "Library/Application Support/Silmaril/ComputerName/cache.json"
+            with driver.standalone_name_cache(account):
+                cache.write_text("new cache")
+            self.assertFalse((account / "Library").exists())
+            cache.parent.mkdir(parents=True)
+            cache.write_text("prior cache")
+            original = cache.stat()
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                with driver.standalone_name_cache(account):
+                    updated = cache.with_suffix(".tmp")
+                    updated.write_text("refreshed cache")
+                    updated.replace(cache)
+                    raise RuntimeError("failed")
+            self.assertEqual(cache.read_text(), "prior cache")
+            self.assertEqual(cache.stat().st_ino, original.st_ino)
+            self.assertEqual(list(cache.parent.iterdir()), [cache])
+
     def test_private_files_are_owner_only_and_never_overwrite(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "settings.json"

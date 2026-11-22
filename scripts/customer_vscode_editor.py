@@ -255,13 +255,9 @@ def verify_managed_endpoint(url, key):
 
 
 @contextlib.contextmanager
-def installed_hook_launcher(account_home, home, managed):
-    # The signed hooks resolve this one file through HOME. Leave any existing installation intact.
-    relative = (Path("Library/Application Support/Silmaril/Runtime/vscode/SilmarilHookRuntime")
-                if managed else Path(".vscode/silmaril-firewall-node-path"))
-    source, dest = home / relative, account_home / relative
-    prerequisite(dest.parent.resolve() == dest.parent, "The QA hook launcher directory is redirected")
-    def remove_empty_directory(path):
+def login_directory(root, relative):
+    """Use real QA-owned directories and remove only the empty ones created for this turn."""
+    def remove_empty(path):
         try:
             path.rmdir()
         except OSError as exc:
@@ -269,17 +265,51 @@ def installed_hook_launcher(account_home, home, managed):
                 raise
 
     with contextlib.ExitStack() as cleanup:
-        directory = account_home
-        for part in relative.parent.parts:
-            directory = directory / part
+        path = root
+        for part in relative.parts:
+            path = path / part
             try:
-                directory.mkdir(mode=0o700)
+                path.mkdir(mode=0o700)
             except FileExistsError:
-                prerequisite(directory.is_dir() and not directory.is_symlink(),
-                             "The QA hook launcher requires real directories")
+                info = path.lstat()
+                prerequisite(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(),
+                             "The hook requires real QA-owned directories")
             else:
-                cleanup.callback(remove_empty_directory, directory)
-        prerequisite(dest.parent.stat().st_uid == os.getuid(), "The QA account must own the hook launcher directory")
+                cleanup.callback(remove_empty, path)
+        yield path
+
+
+@contextlib.contextmanager
+def standalone_name_cache(account_home):
+    # Published Node hooks atomically replace this cache and have no path override.
+    with login_directory(account_home, Path("Library/Application Support/Silmaril/ComputerName")) as directory:
+        cache = directory / "cache.json"
+        with tempfile.TemporaryDirectory(dir=directory) as backup_dir:
+            backup = Path(backup_dir) / cache.name
+            try:
+                original = cache.lstat()
+            except FileNotFoundError:
+                original = None
+            else:
+                prerequisite(stat.S_ISREG(original.st_mode) and original.st_uid == os.getuid(),
+                             "Unexpected computer name cache in the designated QA account")
+                os.link(cache, backup, follow_symlinks=False)
+            try:
+                yield
+            finally:
+                if original is None:
+                    cache.unlink(missing_ok=True)
+                elif not cache.exists() or not os.path.samestat(original, cache.lstat()):
+                    os.replace(backup, cache)
+
+
+@contextlib.contextmanager
+def installed_hook_launcher(account_home, home, managed):
+    # The signed hooks resolve this one file through HOME. Leave any existing installation intact.
+    relative = (Path("Library/Application Support/Silmaril/Runtime/vscode/SilmarilHookRuntime")
+                if managed else Path(".vscode/silmaril-firewall-node-path"))
+    source, dest = home / relative, account_home / relative
+    with login_directory(account_home, relative.parent):
         # Publish a complete file without replacing a concurrent install, including across filesystems.
         with tempfile.NamedTemporaryFile(dir=dest.parent) as staged:
             shutil.copy2(source, staged.name)
@@ -336,7 +366,8 @@ def journey(home, plugin, managed, version, checks):
     copilot = home / ".copilot"
     env["COPILOT_HOME"] = str(copilot)
     # macOS keychain discovery and VS Code workspace trust both use the real Aqua login home.
-    with installed_hook_launcher(account_home, home, managed), launch(binary, profile, workspace, env) as submit:
+    cache = contextlib.nullcontext() if managed else standalone_name_cache(account_home)
+    with cache, installed_hook_launcher(account_home, home, managed), launch(binary, profile, workspace, env) as submit:
         for scenario in ("allow", *DENIALS):
             try:
                 outcome = run_case(scenario, workspace, profile, copilot, spool_dirs, pattern,
