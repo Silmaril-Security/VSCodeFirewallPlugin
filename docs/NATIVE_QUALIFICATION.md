@@ -1,7 +1,7 @@
 # Native VS Code qualification
 
 This is the required native acceptance procedure for the current exact package
-candidate 0.3.2. Unit,
+candidate 0.4.0. Unit,
 loopback, source, archive, and generated-output checks are not substitutes for
 this procedure.
 
@@ -9,8 +9,8 @@ this procedure.
 
 The exact signed 1.145.2 native matrix **failed** against the now-superseded
 candidate 0.3.1. Those observations are explicitly historical; no native host
-test has run for 0.3.2. No native pass has been recorded for the current
-candidate, and candidate 0.3.2 is not qualified for publication.
+test has run for 0.4.0. No native pass has been recorded for the current
+candidate, and candidate 0.4.0 is not qualified for publication.
 
 - VS Code 1.141.1 (`7baac39ec3ca969dab74ac12c097f6a486e46593`,
   built-in Copilot Chat 0.69.0) is unsupported. Its exact signed source lacks
@@ -48,7 +48,7 @@ including preflight and failure receipts, separately records full release
 qualification as `incomplete`, batch/resume as `unsupported`, native
 Warn/Shadow as `unassessed`, and the shared route as `unverified` until exact
 callback metadata proves it. A four-case core pass would not be a full release
-matrix pass or qualify candidate 0.3.2 for publication.
+matrix pass or qualify candidate 0.4.0 for publication.
 
 The relevant official source at the exact commit is:
 
@@ -138,7 +138,7 @@ npm run test:native:vscode
 ```
 
 Preflight verifies the exact app identity, signature, source contracts,
-secret-storage route, UI action guards, native CJS files, and candidate 0.3.2
+secret-storage route, UI action guards, native CJS files, and candidate 0.4.0
 bytes. It writes `source-pass` for admitted source target 1.145.2 without
 spawning a GUI. `source-pass` is not a native or supported-floor result and
 cannot mark the shared route verified.
@@ -467,10 +467,10 @@ The candidate admission floor is 1.145.2, but it is not a qualified supported
 floor. Managed propagation remains gated on a native matrix pass that preserves
 the strict title-request and post-tool-poison oracles. The shared
 transformed-prompt and `modifiedResult` contracts remain source-only until a
-supported shared Agent Host route proves them. Standalone 0.3.2 publishes
-through customer release acceptance. 0.3.1 stays unreleased, and 0.3.0 is not
-modified or relabelled. The failed 0.3.1 observations remain historical and do
-not qualify the 0.3.2 package.
+supported shared Agent Host route proves them. Standalone 0.4.0 publishes
+through customer release acceptance. 0.3.1 stays unreleased, and 0.3.0 and
+0.3.2 are not modified or relabelled. The failed 0.3.1 observations remain
+historical and do not qualify the 0.4.0 package.
 
 ## Release acceptance on MacStadium
 

@@ -879,7 +879,7 @@ export async function inspectCandidate(destination) {
   const pluginJson = JSON.parse(
     await readFile(path.join(destination, "plugin.json"), "utf8"),
   );
-  assert.equal(packageJson.version, "0.3.2");
+  assert.equal(packageJson.version, "0.4.0");
   assert.equal(pluginJson.version, packageJson.version);
   return {
     version: packageJson.version,
@@ -964,14 +964,44 @@ export async function closeServer(server, sockets = new Set(), timeoutMs = 2_000
   });
 }
 
-export function startClassifier({ closeTimeoutMs = 2_000 } = {}) {
+export const CLASSIFIER_BODIES = Object.freeze({
+  "/v2/classify": (malicious) => ({
+    results: [{
+      action: malicious ? "block" : "allow",
+      source: malicious ? "model" : null,
+      confidence: malicious ? "very_high" : null,
+      severity: malicious ? "high" : null,
+      outcome: malicious ? "control_abuse" : null,
+      governance: null,
+      model_id: "vscode-native-qualification",
+    }],
+  }),
+  "/classify": (malicious) => ({
+    prediction: malicious ? "MALICIOUS" : "BENIGN",
+    score: malicious ? 0.99 : 0.01,
+    threshold: 0.5,
+    primary_outcome: malicious ? "control_abuse" : "benign",
+    outcome_scores: malicious ? { control_abuse: 0.99 } : {},
+    model_id: "vscode-native-qualification",
+  }),
+});
+
+export function startClassifier({
+  closeTimeoutMs = 2_000,
+  bodies = CLASSIFIER_BODIES,
+} = {}) {
   const requests = [];
   const server = createServer(async (request, response) => {
     try {
       assert.equal(request.socket.remoteAddress, "127.0.0.1");
       assert.equal(request.method, "POST");
-      assert.equal(request.url, "/classify");
       const body = await readJsonRequest(request);
+      const responseBody = bodies[request.url];
+      if (!responseBody) {
+        response.writeHead(404, { "content-type": "application/json" });
+        response.end(JSON.stringify({ detail: "Not Found" }));
+        return;
+      }
       const strings = collectStrings(body);
       const malicious =
         strings.some((value) => value.includes("SILMARIL_NATIVE_BLOCK_8d724ae7"))
@@ -986,12 +1016,7 @@ export function startClassifier({ closeTimeoutMs = 2_000 } = {}) {
         decision: malicious ? "malicious" : "benign",
       });
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({
-        prediction: malicious ? "MALICIOUS" : "BENIGN",
-        score: malicious ? 0.99 : 0.01,
-        threshold: 0.5,
-        primary_outcome: malicious ? "prompt_injection" : undefined,
-      }));
+      response.end(JSON.stringify(responseBody(malicious)));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({

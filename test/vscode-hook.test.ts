@@ -15,7 +15,6 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -44,6 +43,7 @@ import {
 } from "../src/local-evidence.ts";
 import { resolveRuntimeConfig } from "../src/runtime-config.ts";
 import { observationPath, recordObservedWorkspace } from "../src/workspace-observation.ts";
+import { CLASSIFIER_BODIES, startClassifier } from "../scripts/vscode-native-qualification.mjs";
 
 const MISSING_CONFIG = path.join(os.tmpdir(), "silmaril-vscode-missing", "settings.json");
 const BASE_ENV = {
@@ -70,13 +70,22 @@ function dependencies(
       calls.push({ text, options });
       const result = results.shift();
       if (result instanceof Error) throw result;
-      return result ?? { prediction: "BENIGN", score: 0.01, threshold: 0.5 };
+      return result ?? { action: "allow" };
     }
   }
   return {
     firewallConstructor: FakeFirewall,
     evidenceEmitter: async (event: unknown) => { events.push(event); },
     workspaceObserver: async () => undefined,
+  };
+}
+
+function sdkDependencies(events: unknown[] = []): RuntimeDependencies {
+  return {
+    firewallConstructor: Firewall as unknown as RuntimeDependencies["firewallConstructor"],
+    evidenceEmitter: async (event) => { events.push(event); },
+    workspaceObserver: async () => undefined,
+    deviceName: () => undefined,
   };
 }
 
@@ -147,12 +156,16 @@ function copilotPayload(event: VSCodeCopilotEventName): Record<string, unknown> 
   }
 }
 
-test("explicit mode wins and governance actions are block candidates", () => {
-  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "block" }, "shadow"), "shadow");
-  assert.equal(effectiveMode({ prediction: "BENIGN", mode: "warn" }), "warn");
-  assert.equal(effectiveMode({ prediction: "BENIGN" }), "shadow");
-  assert.equal(isBlockCandidate({ prediction: "BENIGN", governance: { action: "block" } }), true);
-  assert.equal(isBlockCandidate({ prediction: "MALICIOUS", governance: { action: "allow" } }), true);
+test("explicit mode wins and every result other than an allow is a block candidate", () => {
+  assert.equal(effectiveMode({ action: "block", mode: "block" }, "shadow"), "shadow");
+  assert.equal(effectiveMode({ action: "allow", mode: "warn" }), "warn");
+  assert.equal(effectiveMode({ action: "allow" }), "shadow");
+  assert.equal(isBlockCandidate({ action: "allow" }), false);
+  assert.equal(isBlockCandidate({ action: "block", source: "model" }), true);
+  assert.equal(isBlockCandidate({ action: "block", source: "governance" }), true);
+  assert.equal(isBlockCandidate({ action: "ALLOW" }), true);
+  assert.equal(isBlockCandidate({ prediction: "BENIGN" }), true);
+  assert.equal(isBlockCandidate({}), true);
 });
 
 test("runtime configuration requires a private schema-v1 file when present", async () => {
@@ -192,7 +205,7 @@ test("shadow classifies each current native content boundary exactly once", asyn
   const events: any[] = [];
   const calls: any[] = [];
   const deps = dependencies(
-    Array.from({ length: 3 }, () => ({ prediction: "MALICIOUS", score: 0.9, threshold: 0.5 })),
+    Array.from({ length: 3 }, () => ({ action: "block", source: "model" })),
     events,
     calls,
   );
@@ -211,7 +224,7 @@ test("shadow classifies each current native content boundary exactly once", asyn
 });
 
 test("warn returns one fixed warning and continues on every classifiable boundary", async () => {
-  const malicious = { prediction: "MALICIOUS", mode: "warn", score: 0.99 };
+  const malicious = { action: "block", source: "model", mode: "warn" };
   const events: any[] = [];
   const backendControlledEnv: Record<string, string> = { ...BASE_ENV };
   delete backendControlledEnv.SILMARIL_BLOCK_MALICIOUS;
@@ -246,7 +259,7 @@ test("warn returns one fixed warning and continues on every classifiable boundar
 });
 
 test("block uses VS Code native pre-execution and continuation controls", async () => {
-  const malicious = { prediction: "MALICIOUS", primaryOutcome: "code_execution" };
+  const malicious = { action: "block", source: "model", outcome: "code_execution" };
   const env = { ...BASE_ENV, SILMARIL_MODE: "block" };
   const events: any[] = [];
 
@@ -282,7 +295,7 @@ test("block uses VS Code native pre-execution and continuation controls", async 
 test("dispatch selects one validated nonmixed runtime schema and classifies once", async () => {
   const calls: any[] = [];
   const deps = dependencies(
-    Array.from({ length: 2 }, () => ({ prediction: "BENIGN", score: 0.01, threshold: 0.5 })),
+    Array.from({ length: 2 }, () => ({ action: "allow" })),
     [],
     calls,
   );
@@ -401,7 +414,7 @@ test("Copilot submitted-prompt observation failures and invalid inputs fail open
 test("request IDs preserve transformed Copilot identity and Local tool IDs", async () => {
   const calls: any[] = [];
   const deps = dependencies(
-    Array.from({ length: 7 }, () => ({ prediction: "BENIGN", score: 0.01, threshold: 0.5 })),
+    Array.from({ length: 7 }, () => ({ action: "allow" })),
     [],
     calls,
   );
@@ -449,7 +462,7 @@ test("transformed prompts preserve exact bytes and use only bounded replacement"
       "userPromptTransformed",
       input,
       BASE_ENV,
-      dependencies([{ prediction: "BENIGN" }], [], calls),
+      dependencies([{ action: "allow" }], [], calls),
     ),
     {},
   );
@@ -474,7 +487,7 @@ test("transformed prompts preserve exact bytes and use only bounded replacement"
       "userPromptTransformed",
       { ...input, transformedPrompt: "" },
       BASE_ENV,
-      dependencies([{ prediction: "BENIGN" }], [], emptyCalls),
+      dependencies([{ action: "allow" }], [], emptyCalls),
     ),
     {},
   );
@@ -488,7 +501,7 @@ test("transformed prompts preserve exact bytes and use only bounded replacement"
     "userPromptTransformed",
     input,
     { ...BASE_ENV, SILMARIL_MODE: "block" },
-    dependencies([{ prediction: "MALICIOUS" }], events),
+    dependencies([{ action: "block", source: "model" }], events),
   );
   assert.deepEqual(blocked, { modifiedTransformedPrompt: SAFE_BLOCK_MESSAGE });
   assert.deepEqual(Object.keys(blocked), ["modifiedTransformedPrompt"]);
@@ -504,7 +517,7 @@ test("transformed prompts preserve exact bytes and use only bounded replacement"
       "userPromptTransformed",
       input,
       { ...BASE_ENV, SILMARIL_MODE: "warn" },
-      dependencies([{ prediction: "MALICIOUS" }], warnEvents),
+      dependencies([{ action: "block", source: "model" }], warnEvents),
     ),
     {},
   );
@@ -521,7 +534,7 @@ test("transformed prompt identities are deterministic for batch, retry, and resu
   };
   const calls: any[] = [];
   const deps = dependencies(
-    Array.from({ length: 4 }, () => ({ prediction: "BENIGN" })),
+    Array.from({ length: 4 }, () => ({ action: "allow" })),
     [],
     calls,
   );
@@ -550,13 +563,13 @@ test("transformed prompt identities are deterministic for batch, retry, and resu
     "userPromptTransformed",
     primary,
     blockEnv,
-    dependencies([{ prediction: "MALICIOUS" }]),
+    dependencies([{ action: "block", source: "model" }]),
   );
   const replay = await runVSCodeCopilotHook(
     "userPromptTransformed",
     { ...primary },
     blockEnv,
-    dependencies([{ prediction: "MALICIOUS" }]),
+    dependencies([{ action: "block", source: "model" }]),
   );
   assert.deepEqual(first, { modifiedTransformedPrompt: SAFE_BLOCK_MESSAGE });
   assert.deepEqual(replay, first);
@@ -599,7 +612,7 @@ test("transformed dispatch accepts only the strict Copilot schema", async () => 
 
 test("Local dispatch accepts optional common fields but rejects malformed mixed payloads", async () => {
   const calls: any[] = [];
-  const deps = dependencies([{ prediction: "BENIGN", score: 0.01, threshold: 0.5 }], [], calls);
+  const deps = dependencies([{ action: "allow" }], [], calls);
   const legacy: Record<string, unknown> = {
     hook_event_name: "UserPromptSubmit",
     timestamp: "2026-08-26T00:00:00Z",
@@ -673,7 +686,7 @@ test("numeric values in documented string fields fail open without classificatio
 
 test("Copilot outputs use only documented event-specific controls", async () => {
   const blockEnv = { ...BASE_ENV, SILMARIL_MODE: "block" };
-  const malicious = { prediction: "MALICIOUS", score: 0.99, threshold: 0.5 };
+  const malicious = { action: "block", source: "model" };
   const blockEvents: any[] = [];
 
   assert.deepEqual(
@@ -701,7 +714,11 @@ test("Copilot outputs use only documented event-specific controls", async () => 
       "preToolUse",
       copilotPayload("preToolUse"),
       blockEnv,
-      dependencies([{ prediction: "BENIGN", governance: { action: "block" } }], blockEvents),
+      dependencies([{
+        action: "block",
+        source: "governance",
+        governance: { action: "block", policyVersion: "policy-1" },
+      }], blockEvents),
     ),
     {
       permissionDecision: "deny",
@@ -875,7 +892,7 @@ test("classification and evidence failures always fail open", async () => {
     payload("PreToolUse"),
     { ...BASE_ENV, SILMARIL_MODE: "block" },
     {
-      ...dependencies([{ prediction: "MALICIOUS" }]),
+      ...dependencies([{ action: "block", source: "model" }]),
       evidenceEmitter: async () => { throw new Error("disk failure"); },
     },
   );
@@ -907,8 +924,9 @@ test("runtime markers are stable and local evidence is private and raw-content f
     sessionId: "raw-session-id",
     toolName: "runTerminalCommand",
     classification: {
-      prediction: "MALICIOUS",
-      primaryOutcome: "code_execution",
+      action: "block",
+      source: "model",
+      outcome: "code_execution",
       raw: "must-not-leak",
     },
     policyDecision: "block",
@@ -1098,37 +1116,15 @@ test("workspace observations retain a fresh owner in an old-looking lock directo
   assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json.lock"]);
 });
 
-test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", async () => {
-  const requests: Array<Record<string, any>> = [];
-  const server = createServer(async (request, response) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      prediction: "BENIGN",
-      score: 0.01,
-      threshold: 0.5,
-    }));
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
+test("SDK 1.0.0 emits canonical agent, tool, and MCP resource wire shapes", async () => {
+  const classifier = startClassifier();
   try {
-    const address = server.address();
-    assert.ok(address && typeof address === "object");
     const env = {
       ...BASE_ENV,
-      SILMARIL_API_URL: `http://127.0.0.1:${address.port}/classify`,
+      SILMARIL_API_URL: await classifier.open(),
       SILMARIL_MODE: "shadow",
     };
-    const deps: RuntimeDependencies = {
-      firewallConstructor: Firewall as unknown as RuntimeDependencies["firewallConstructor"],
-      evidenceEmitter: async () => undefined,
-      workspaceObserver: async () => undefined,
-      deviceName: () => undefined,
-    };
+    const deps = sdkDependencies();
     await runVSCodeHook("UserPromptSubmit", payload("UserPromptSubmit"), env, deps);
     await runVSCodeHook("PreToolUse", payload("PreToolUse"), env, deps);
     const mcpPayload = {
@@ -1144,11 +1140,10 @@ test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", asyn
       deps,
     );
   } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
+    await classifier.close();
   }
 
+  const requests = classifier.requests.map((request) => request.body);
   assert.equal(requests.length, 5);
   assert.deepEqual(requests.map((request) => request.resource), [
     { kind: "agent", id: "vscode" },
@@ -1167,7 +1162,7 @@ test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", asyn
       resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
     },
   );
-  assert.equal(firstMcpRequest.metadata.silmaril.sdk_version, "0.8.2");
+  assert.equal(firstMcpRequest.metadata.silmaril.sdk_version, "1.0.0");
   assert.equal(firstMcpRequest.metadata.vscodeHookRuntime, "local");
   assert.equal(Object.hasOwn(firstMcpRequest.resource, "parentId"), false);
   assert.equal(
@@ -1184,6 +1179,169 @@ test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", asyn
   assert.equal(transformedRequest.metadata.sessionId, "session-1");
   assert.equal(transformedRequest.metadata.conversationId, "session-1");
   assert.doesNotMatch(JSON.stringify(requests), /"parentId"/u);
+});
+
+const PRE_TOOL_ATTACK = {
+  ...payload("PreToolUse"),
+  tool_input: { command: "SILMARIL_NATIVE_PREBLOCK_8d724ae7" },
+};
+
+for (const { name, bodies, evidence } of [
+  {
+    name: "a version 2 body from /v2/classify",
+    bodies: CLASSIFIER_BODIES,
+    evidence: { confidence: "very_high", severity: "high" },
+  },
+  {
+    name: "only /classify after /v2/classify answers 404",
+    bodies: { "/classify": CLASSIFIER_BODIES["/classify"] },
+    evidence: {},
+  },
+  {
+    name: "a version 1 body from /v2/classify",
+    bodies: { "/v2/classify": CLASSIFIER_BODIES["/classify"] },
+    evidence: {},
+  },
+]) {
+  test(`SDK 1.0.0 enforces a block when the classifier serves ${name}`, async () => {
+    const classifier = startClassifier({ bodies });
+    const events: any[] = [];
+    try {
+      const env = {
+        ...BASE_ENV,
+        SILMARIL_API_URL: await classifier.open(),
+        SILMARIL_MODE: "block",
+      };
+      const deps = sdkDependencies(events);
+      assert.deepEqual(await runVSCodeHook("PreToolUse", PRE_TOOL_ATTACK, env, deps), {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: SAFE_BLOCK_MESSAGE,
+        },
+      });
+      assert.deepEqual(await runVSCodeHook("PreToolUse", payload("PreToolUse"), env, deps), {});
+    } finally {
+      await classifier.close();
+    }
+
+    assert.deepEqual(classifier.requests.map((request) => request.decision), ["malicious", "benign"]);
+    assert.deepEqual(
+      events.map(({ prediction, confidence, severity, riskClass, policyDecision, nativeAction }) => ({
+        prediction,
+        confidence,
+        severity,
+        riskClass,
+        policyDecision,
+        nativeAction,
+      })),
+      [
+        {
+          prediction: "malicious",
+          confidence: undefined,
+          severity: undefined,
+          ...evidence,
+          riskClass: "unsafe_agent_control",
+          policyDecision: "block",
+          nativeAction: "block_returned",
+        },
+        {
+          prediction: "benign",
+          confidence: undefined,
+          severity: undefined,
+          riskClass: "unknown",
+          policyDecision: "allow",
+          nativeAction: "allowed",
+        },
+      ],
+    );
+    assert.ok(events.every((event) => (
+      !Object.hasOwn(event, "modelScore") && !Object.hasOwn(event, "modelThreshold")
+    )));
+  });
+}
+
+test("SDK 1.0.0 rejects a response without a decision and the hook fails open without evidence", async () => {
+  for (const body of [
+    { results: [{ source: "model", outcome: "control_abuse" }] },
+    { results: [] },
+    { verdict: "MALICIOUS" },
+  ]) {
+    const classifier = startClassifier({ bodies: { "/v2/classify": () => body } });
+    const events: unknown[] = [];
+    try {
+      assert.deepEqual(
+        await runVSCodeHook(
+          "PreToolUse",
+          PRE_TOOL_ATTACK,
+          { ...BASE_ENV, SILMARIL_API_URL: await classifier.open(), SILMARIL_MODE: "block" },
+          sdkDependencies(events),
+        ),
+        {},
+      );
+    } finally {
+      await classifier.close();
+    }
+    assert.equal(classifier.requests.length, 1);
+    assert.deepEqual(events, []);
+  }
+});
+
+test("a classify result that is not an explicit allow is enforced in block mode", async () => {
+  const env = { ...BASE_ENV, SILMARIL_MODE: "block" };
+  for (const result of [{}, { action: "review" }, { prediction: "BENIGN" }]) {
+    const events: any[] = [];
+    assert.deepEqual(
+      await runVSCodeHook("UserPromptSubmit", payload("UserPromptSubmit"), env, dependencies([result], events)),
+      { continue: false, stopReason: SAFE_BLOCK_MESSAGE },
+    );
+    assert.equal(events[0].policyDecision, "block");
+  }
+});
+
+test("local evidence records decision labels from the closed scales and never a score", () => {
+  const build = (classification: Record<string, unknown>) => buildLocalProtectionEvent({
+    pluginVersion: PLUGIN_VERSION,
+    hook: "pre_tool",
+    mode: "block",
+    classification,
+    policyDecision: "block",
+    nativeAction: "block_returned",
+  });
+
+  const model = build({
+    action: "block",
+    source: "model",
+    confidence: "very_low",
+    severity: "critical",
+    outcome: "secret_exposure",
+    score: 1,
+    threshold: 0.5,
+  });
+  assert.equal(model.schemaVersion, 1);
+  assert.equal(model.prediction, "malicious");
+  assert.equal(model.confidence, "very_low");
+  assert.equal(model.severity, "critical");
+  assert.equal(model.riskClass, "credential_exposure");
+  assert.equal(Object.hasOwn(model, "modelScore"), false);
+  assert.equal(Object.hasOwn(model, "modelThreshold"), false);
+
+  const governance = build({
+    action: "block",
+    source: "governance",
+    governance: { action: "block", policyVersion: "policy-1" },
+  });
+  assert.equal(governance.prediction, "benign");
+  assert.equal(governance.riskClass, "unknown");
+
+  const unlisted = build({ action: "block", source: "model", confidence: "certain", severity: 4 });
+  assert.equal(unlisted.prediction, "malicious");
+  for (const event of [governance, unlisted, build({ action: "allow" })]) {
+    assert.equal(Object.hasOwn(event, "confidence"), false);
+    assert.equal(Object.hasOwn(event, "severity"), false);
+  }
+  assert.equal(build({ action: "allow" }).prediction, "benign");
+  assert.equal(build({}).prediction, "unavailable");
 });
 
 test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
@@ -1205,11 +1363,11 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     new URL("../scripts/customer-published-acceptance", import.meta.url),
     "utf8",
   );
-  assert.equal(packageJson.version, "0.3.2");
+  assert.equal(packageJson.version, "0.4.0");
   assert.equal(pluginJson.$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
   assert.equal(pluginJson.name, "silmaril-vscode-firewall");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "1.0.0");
   assert.equal(hooks.version, 1);
   assert.deepEqual(Object.keys(hooks.hooks), [
     "sessionStart",
@@ -1325,7 +1483,7 @@ test("classify metadata includes the mac computer name without an endpoint id", 
   const stderr = await captureStderr(async () => {
     assert.deepEqual(
       await runVSCodeHook("UserPromptSubmit", payload("UserPromptSubmit"), env, {
-        ...dependencies([{ prediction: "BENIGN" }], events, calls),
+        ...dependencies([{ action: "allow" }], events, calls),
         deviceName: () => "  Office Mac \n",
       }),
       {},
@@ -1352,7 +1510,7 @@ test("invalid or failed device-name lookup still classifies and drops spoofed me
   const stderr = await captureStderr(async () => {
     assert.deepEqual(
       await runVSCodeHook("UserPromptSubmit", payload("UserPromptSubmit"), env, {
-        ...dependencies([{ prediction: "BENIGN" }], events, calls),
+        ...dependencies([{ action: "allow" }], events, calls),
         deviceName: () => {
           throw new Error("scutil failed for Office Mac");
         },
@@ -1362,7 +1520,7 @@ test("invalid or failed device-name lookup still classifies and drops spoofed me
     for (const deviceName of ["Office\u0000Mac", "Office\u007FMac", "Office\u0085Mac"]) {
       assert.deepEqual(
         await runVSCodeHook("PreToolUse", payload("PreToolUse"), env, {
-          ...dependencies([{ prediction: "BENIGN" }], events, calls),
+          ...dependencies([{ action: "allow" }], events, calls),
           deviceName: () => deviceName,
         }),
         {},

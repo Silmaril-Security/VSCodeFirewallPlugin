@@ -1,7 +1,29 @@
 # Changelog
 
-## 0.3.2 - Unreleased
+## 0.4.0 - Unreleased
 
+- Move to `@silmaril-security/sdk` 1.0.0. The SDK calls `/v2/classify` on the
+  unchanged `apiUrl` and falls back to `/classify` when a deployment answers
+  403, 404, or 405, so configuration does not change. Each event uses a new
+  client; a deployment without `/v2/classify` receives two requests per event
+  inside the existing classification deadline.
+- Treat every classify result whose `action` is not `allow` as an enforcement
+  candidate. Model and governance blocks keep the same native outputs.
+- Write the Firewall's `confidence` and `severity` labels to local evidence
+  when the result carries a listed value, and stop writing `modelScore` and
+  `modelThreshold`. The event schema version and every other field are
+  unchanged. SilmarilMacOS releases that predate the labels ignore them.
+- Read the evidence risk class from the result `outcome`. An allow and a
+  governance-only block carry no outcome and record `unknown`.
+- A `/v2/classify` response carries no mode. Omitting both `mode` and
+  `blockMalicious` selects `shadow` unless a version 1 response body, as the
+  `/classify` fallback returns, supplies a mode.
+- Serve `/v2/classify` and `/classify` from the native QA loopback classifier
+  and cover the fallback and a version 1 body returned by `/v2/classify`.
+
+## 0.3.2
+
+- Released as [v0.3.2](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.2).
 - Record the supplied workspace for validated shared Copilot
   `userPromptSubmitted` callbacks in both direct and dispatcher paths.
 - Keep submitted-prompt callbacks classification-free and fail open when

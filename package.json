@@ -1,6 +1,6 @@
 {
   "name": "@silmaril/vscode-firewall-plugin",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Silmaril Firewall lifecycle protection for VS Code Local and Copilot agent harnesses.",
   "type": "module",
   "license": "Apache-2.0",
@@ -27,7 +27,7 @@
     "test:deadline": "npm run build && node scripts/test-classification-deadline.mjs"
   },
   "dependencies": {
-    "@silmaril-security/sdk": "0.8.2"
+    "@silmaril-security/sdk": "1.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
