@@ -191,6 +191,15 @@ class EditorObservationTests(unittest.TestCase):
                 transcript = [{"type": "user.message", "data": {"content": driver.BLOCK_MESSAGE}}, reply]
             rows = [prompt_row, expected]
             self.assertEqual(driver.denial_observed(rows, transcript, scenario=name, **args), "PASS")
+            if name == "prompt_denial":
+                for original, effective, outcome in (
+                    (prompt, driver.BLOCK_MESSAGE, "PASS"),
+                    (driver.BLOCK_MESSAGE, prompt, None),
+                    (driver.BLOCK_MESSAGE, "", None),
+                ):
+                    message = {"type": "user.message", "data": {"content": original, "transformedContent": effective}}
+                    with self.subTest(effective=effective):
+                        self.assertEqual(driver.denial_observed(rows, [message, reply], scenario=name, **args), outcome)
             self.assertIsNone(driver.denial_observed(rows, [], scenario=name, **args))
             leaked = [*transcript, {"type": "assistant.message", "data": {"content": word}}]
             self.assertEqual(driver.denial_observed(rows, leaked, scenario=name, **args), "FAIL")
