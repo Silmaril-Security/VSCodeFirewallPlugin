@@ -163,9 +163,8 @@ def published_denials(home, managed, version):
         for entry in stage.rglob("*"):
             entry.chmod(0o755 if entry.is_dir() or entry.stat().st_mode & 0o111 else 0o644)
         stage.chmod(0o755)
-        aqua = ('exec /usr/bin/sudo -n /bin/launchctl asuser "$(/usr/bin/id -u silmarilreleaseqa)" '
-                '/usr/bin/sudo -nHu silmarilreleaseqa /usr/bin/python3 "$1"')
-        result = subprocess.run([tart, "exec", GUEST, "/bin/sh", "-c", aqua, "guest-editor", exe],
+        # Tart runs exec in the current console user's session. The guest validates its QA identity.
+        result = subprocess.run([tart, "exec", GUEST, "/usr/bin/python3", exe],
                                 capture_output=True, env=env, timeout=1100)
         if result.returncode:
             if result.returncode == 75:
