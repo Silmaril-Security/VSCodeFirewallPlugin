@@ -13,6 +13,9 @@
   when the result carries a listed value, and stop writing `modelScore` and
   `modelThreshold`. The event schema version and every other field are
   unchanged. SilmarilMacOS releases that predate the labels ignore them.
+- Record the SDK result's `modelId` as the local evidence `modelVersion`. The
+  field previously read `model_id`, which the SDK never returned, so it was
+  always absent.
 - Read the evidence risk class from the result `outcome`. An allow and a
   governance-only block carry no outcome and record `unknown`.
 - A `/v2/classify` response carries no mode. Omitting both `mode` and

@@ -256,6 +256,8 @@ export function closeServer(
   timeoutMs?: number,
 ): Promise<void>;
 
+export const CLASSIFIER_MODEL_ID: string;
+
 export const CLASSIFIER_BODIES: Readonly<
   Record<"/v2/classify" | "/classify", (malicious: boolean) => Record<string, unknown>>
 >;

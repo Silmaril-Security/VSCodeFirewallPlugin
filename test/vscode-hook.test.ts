@@ -43,7 +43,7 @@ import {
 } from "../src/local-evidence.ts";
 import { resolveRuntimeConfig } from "../src/runtime-config.ts";
 import { observationPath, recordObservedWorkspace } from "../src/workspace-observation.ts";
-import { CLASSIFIER_BODIES, startClassifier } from "../scripts/vscode-native-qualification.mjs";
+import { CLASSIFIER_BODIES, CLASSIFIER_MODEL_ID, startClassifier } from "../scripts/vscode-native-qualification.mjs";
 
 const MISSING_CONFIG = path.join(os.tmpdir(), "silmaril-vscode-missing", "settings.json");
 const BASE_ENV = {
@@ -1258,6 +1258,10 @@ for (const { name, bodies, evidence } of [
     assert.ok(events.every((event) => (
       !Object.hasOwn(event, "modelScore") && !Object.hasOwn(event, "modelThreshold")
     )));
+    assert.deepEqual(
+      events.map((event) => event.provenance.modelVersion),
+      [CLASSIFIER_MODEL_ID, CLASSIFIER_MODEL_ID],
+    );
   });
 }
 
@@ -1297,6 +1301,23 @@ test("a classify result that is not an explicit allow is enforced in block mode"
     );
     assert.equal(events[0].policyDecision, "block");
   }
+});
+
+test("local evidence records the SDK model identifier as its bounded model version", () => {
+  const modelVersion = (classification: Record<string, unknown>) => buildLocalProtectionEvent({
+    pluginVersion: PLUGIN_VERSION,
+    hook: "pre_tool",
+    mode: "block",
+    classification: { action: "block", source: "model", ...classification },
+    policyDecision: "block",
+    nativeAction: "block_returned",
+  }).provenance.modelVersion;
+  assert.equal(modelVersion({ modelId: " silmaril-cascade-1-6 " }), "silmaril-cascade-1-6");
+  assert.equal(modelVersion({ modelId: "m".repeat(200) }), "m".repeat(128));
+  for (const absent of [{}, { modelId: "   " }, { modelId: 16 }, { modelId: null }, { model_id: "silmaril-cascade-1-6" }]) {
+    assert.equal(modelVersion(absent), undefined);
+  }
+  assert.equal(modelVersion({ action: "allow", source: undefined, modelId: "silmaril-cascade-1-6" }), "silmaril-cascade-1-6");
 });
 
 test("local evidence records decision labels from the closed scales and never a score", () => {
