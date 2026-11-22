@@ -5,6 +5,7 @@ import path from "node:path";
 
 const MAX_EVENT_BYTES = 16 * 1_024;
 const MAX_SAFE_VALUE_LENGTH = 128;
+const MAX_PROVENANCE_VERSION_BYTES = 128;
 const CONFIDENCE_LEVELS = ["very_low", "low", "medium", "high", "very_high"] as const;
 const SEVERITY_LEVELS = ["minimal", "low", "moderate", "high", "critical"] as const;
 
@@ -116,8 +117,10 @@ export function buildLocalProtectionEvent(input: LocalEvidenceInput): LocalProte
       producer: "VSCodeFirewallPlugin",
       producerVersion: input.pluginVersion,
       pluginVersion: input.pluginVersion,
-      policyVersion: bounded(stringValue(input.classification.policy_version)),
-      modelVersion: bounded(stringValue(input.classification.modelId)),
+      policyVersion: provenanceVersion(
+        (input.classification.governance as Record<string, unknown> | null | undefined)?.policyVersion,
+      ),
+      modelVersion: provenanceVersion(input.classification.modelId),
       observedAt: occurredAt,
     }),
   }) as LocalProtectionEventV1;
@@ -223,8 +226,14 @@ function bounded(value: string | undefined): string | undefined {
   return trimmed ? trimmed.slice(0, MAX_SAFE_VALUE_LENGTH) : undefined;
 }
 
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
+function provenanceVersion(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let bounded = "";
+  for (const character of value.replace(/[\p{Cc}\p{Cf}\p{Cs}]+/gu, " ").trim()) {
+    if (Buffer.byteLength(bounded + character, "utf8") > MAX_PROVENANCE_VERSION_BYTES) break;
+    bounded += character;
+  }
+  return bounded.trimEnd() || undefined;
 }
 
 function omitUndefined<T extends Record<string, unknown>>(value: T): Record<string, unknown> {

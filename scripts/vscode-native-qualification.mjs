@@ -965,6 +965,8 @@ export async function closeServer(server, sockets = new Set(), timeoutMs = 2_000
 }
 
 export const CLASSIFIER_MODEL_ID = "vscode-native-qualification";
+export const CLASSIFIER_POLICY_VERSION = "vscode-native-qualification-policy";
+const CLASSIFIER_GOVERNANCE = Object.freeze({ action: "allow", policy_version: CLASSIFIER_POLICY_VERSION });
 
 export const CLASSIFIER_BODIES = Object.freeze({
   "/v2/classify": (malicious) => ({
@@ -974,7 +976,7 @@ export const CLASSIFIER_BODIES = Object.freeze({
       confidence: malicious ? "very_high" : null,
       severity: malicious ? "high" : null,
       outcome: malicious ? "control_abuse" : null,
-      governance: null,
+      governance: CLASSIFIER_GOVERNANCE,
       model_id: CLASSIFIER_MODEL_ID,
     }],
   }),
@@ -984,6 +986,7 @@ export const CLASSIFIER_BODIES = Object.freeze({
     threshold: 0.5,
     primary_outcome: malicious ? "control_abuse" : "benign",
     outcome_scores: malicious ? { control_abuse: 0.99 } : {},
+    governance: CLASSIFIER_GOVERNANCE,
     model_id: CLASSIFIER_MODEL_ID,
   }),
 });

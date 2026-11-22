@@ -43,7 +43,12 @@ import {
 } from "../src/local-evidence.ts";
 import { resolveRuntimeConfig } from "../src/runtime-config.ts";
 import { observationPath, recordObservedWorkspace } from "../src/workspace-observation.ts";
-import { CLASSIFIER_BODIES, CLASSIFIER_MODEL_ID, startClassifier } from "../scripts/vscode-native-qualification.mjs";
+import {
+  CLASSIFIER_BODIES,
+  CLASSIFIER_MODEL_ID,
+  CLASSIFIER_POLICY_VERSION,
+  startClassifier,
+} from "../scripts/vscode-native-qualification.mjs";
 
 const MISSING_CONFIG = path.join(os.tmpdir(), "silmaril-vscode-missing", "settings.json");
 const BASE_ENV = {
@@ -1259,8 +1264,8 @@ for (const { name, bodies, evidence } of [
       !Object.hasOwn(event, "modelScore") && !Object.hasOwn(event, "modelThreshold")
     )));
     assert.deepEqual(
-      events.map((event) => event.provenance.modelVersion),
-      [CLASSIFIER_MODEL_ID, CLASSIFIER_MODEL_ID],
+      events.map(({ provenance }) => [provenance.modelVersion, provenance.policyVersion]),
+      Array(2).fill([CLASSIFIER_MODEL_ID, CLASSIFIER_POLICY_VERSION]),
     );
   });
 }
@@ -1303,21 +1308,41 @@ test("a classify result that is not an explicit allow is enforced in block mode"
   }
 });
 
-test("local evidence records the SDK model identifier as its bounded model version", () => {
-  const modelVersion = (classification: Record<string, unknown>) => buildLocalProtectionEvent({
+test("local evidence records the model and governance policy versions within the ingestion bounds", () => {
+  const provenance = (classification: Record<string, unknown>) => buildLocalProtectionEvent({
     pluginVersion: PLUGIN_VERSION,
     hook: "pre_tool",
     mode: "block",
-    classification: { action: "block", source: "model", ...classification },
+    classification: { action: "block", source: "governance", ...classification },
     policyDecision: "block",
     nativeAction: "block_returned",
-  }).provenance.modelVersion;
-  assert.equal(modelVersion({ modelId: " silmaril-cascade-1-6 " }), "silmaril-cascade-1-6");
-  assert.equal(modelVersion({ modelId: "m".repeat(200) }), "m".repeat(128));
-  for (const absent of [{}, { modelId: "   " }, { modelId: 16 }, { modelId: null }, { model_id: "silmaril-cascade-1-6" }]) {
-    assert.equal(modelVersion(absent), undefined);
+  }).provenance;
+  for (const [reported, recorded] of [
+    [" silmaril-cascade-1-6 ", "silmaril-cascade-1-6"],
+    ["silmaril\u0000cascade\u200b\u00851-6", "silmaril cascade 1-6"],
+    ["m".repeat(200), "m".repeat(128)],
+    ["\u00e9".repeat(100), "\u00e9".repeat(64)],
+    [`${"m".repeat(127)}\u00e9`, "m".repeat(127)],
+    ["\ud800", undefined],
+    ["   ", undefined],
+    [16, undefined],
+    [null, undefined],
+  ] as [unknown, string | undefined][]) {
+    const recordedProvenance = provenance({
+      modelId: reported,
+      governance: { action: "block", policyVersion: reported },
+    });
+    assert.equal(recordedProvenance.modelVersion, recorded);
+    assert.equal(recordedProvenance.policyVersion, recorded);
   }
-  assert.equal(modelVersion({ action: "allow", source: undefined, modelId: "silmaril-cascade-1-6" }), "silmaril-cascade-1-6");
+  const unread = provenance({
+    model_id: "silmaril-cascade-1-6",
+    policy_version: "policy-7",
+    governance: { action: "block", policy_version: "policy-7" },
+  });
+  assert.equal(Object.hasOwn(unread, "modelVersion"), false);
+  assert.equal(Object.hasOwn(unread, "policyVersion"), false);
+  assert.equal(Object.hasOwn(provenance({ governance: null }), "policyVersion"), false);
 });
 
 test("local evidence records decision labels from the closed scales and never a score", () => {
