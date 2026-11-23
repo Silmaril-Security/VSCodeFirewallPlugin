@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -939,6 +952,47 @@ test("concurrent workspace observations preserve every workspace", async () => {
     observed,
     new Set(await Promise.all(workspaces.map((workspace) => realpath(workspace)))),
   );
+  assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json"]);
+});
+
+test("workspace observations recover a stale generation-owned registry lock", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-stale-"));
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-stale-"));
+  const destination = path.join(stateRoot, "observed-workspaces.json");
+  const lockPath = `${destination}.lock`;
+  const ownerToken = "00000000-0000-4000-8000-000000000001";
+  const ownerPath = path.join(lockPath, `owner-${ownerToken}`);
+  await mkdir(lockPath, { mode: 0o700 });
+  await writeFile(ownerPath, ownerToken, { mode: 0o600 });
+  const staleTime = new Date(Date.now() - 31_000);
+  await utimes(ownerPath, staleTime, staleTime);
+  await utimes(lockPath, staleTime, staleTime);
+
+  await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
+
+  const parsed = JSON.parse(await readFile(destination, "utf8"));
+  assert.equal(parsed.workspaces[0].path, await realpath(workspace));
+  await assert.rejects(lstat(lockPath), { code: "ENOENT" });
+  assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json"]);
+});
+
+test("workspace observations retain a fresh owner in an old-looking lock directory", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-fresh-lock-"));
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-fresh-lock-"));
+  const destination = path.join(stateRoot, "observed-workspaces.json");
+  const lockPath = `${destination}.lock`;
+  const ownerToken = "00000000-0000-4000-8000-000000000002";
+  const ownerPath = path.join(lockPath, `owner-${ownerToken}`);
+  await mkdir(lockPath, { mode: 0o700 });
+  await writeFile(ownerPath, ownerToken, { mode: 0o600 });
+  const staleTime = new Date(Date.now() - 31_000);
+  await utimes(lockPath, staleTime, staleTime);
+
+  await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
+
+  assert.equal(await readFile(ownerPath, "utf8"), ownerToken);
+  await assert.rejects(lstat(destination), { code: "ENOENT" });
+  assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json.lock"]);
 });
 
 test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", async () => {

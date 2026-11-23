@@ -2026,7 +2026,20 @@ function booleanValue(value) {
 
 // src/workspace-observation.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { chmod as chmod2, lstat as lstat2, mkdir as mkdir2, open as open2, readFile, realpath, rename as rename2, rm as rm2, rmdir, stat } from "node:fs/promises";
+import {
+  chmod as chmod2,
+  lstat as lstat2,
+  mkdir as mkdir2,
+  open as open2,
+  readFile,
+  readdir,
+  realpath,
+  rename as rename2,
+  rm as rm2,
+  rmdir,
+  stat,
+  unlink
+} from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
 import path3 from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2035,6 +2048,7 @@ var MAX_FILE_BYTES = 64 * 1024;
 var LOCK_WAIT_MS = 1e3;
 var LOCK_POLL_MS = 10;
 var STALE_LOCK_MS = 3e4;
+var LOCK_OWNER_PATTERN = /^owner-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
 async function recordObservedWorkspace(cwd, env = process.env) {
   if (typeof cwd !== "string" || !path3.isAbsolute(cwd)) return;
   let resolved;
@@ -2091,32 +2105,107 @@ async function recordObservedWorkspace(cwd, env = process.env) {
 async function acquireRegistryLock(destination) {
   const lockPath = `${destination}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
-  while (Date.now() <= deadline) {
+  const ownerToken = randomUUID3();
+  const ownerName = `owner-${ownerToken}`;
+  const claimPath = `${lockPath}.${ownerToken}.claim`;
+  let claimCreated = false;
+  let ownerCreated = false;
+  let published = false;
+  let handle;
+  try {
     try {
-      await mkdir2(lockPath, { mode: 448 });
-      return async () => {
-        await rmdir(lockPath).catch(() => void 0);
-      };
-    } catch (error) {
-      if (errorCode(error) !== "EEXIST") return void 0;
-    }
-    try {
-      const metadata = await lstat2(lockPath);
-      const owned = typeof process.getuid !== "function" || metadata.uid === process.getuid();
-      if (metadata.isDirectory() && !metadata.isSymbolicLink() && owned && (metadata.mode & 63) === 0 && Date.now() - metadata.mtimeMs > STALE_LOCK_MS) {
-        await rmdir(lockPath).catch(() => void 0);
-        continue;
-      }
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") continue;
+      await mkdir2(claimPath, { mode: 448 });
+      claimCreated = true;
+      handle = await open2(path3.join(claimPath, ownerName), "wx", 384);
+      ownerCreated = true;
+      await handle.writeFile(ownerToken, "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = void 0;
+    } catch {
+      await handle?.close().catch(() => void 0);
+      handle = void 0;
       return void 0;
     }
-    await delay(LOCK_POLL_MS);
+    while (Date.now() <= deadline) {
+      let metadata;
+      try {
+        metadata = await lstat2(lockPath);
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") return void 0;
+        try {
+          await rename2(claimPath, lockPath);
+          published = true;
+          return async () => {
+            let removedOwner = false;
+            try {
+              await unlink(path3.join(lockPath, ownerName));
+              removedOwner = true;
+            } catch {
+            }
+            if (removedOwner) await rmdir(lockPath).catch(() => void 0);
+          };
+        } catch (renameError) {
+          if (!isLockContention(renameError)) return void 0;
+          await delay(LOCK_POLL_MS);
+          continue;
+        }
+      }
+      const owned = typeof process.getuid !== "function" || metadata.uid === process.getuid();
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || !owned || (metadata.mode & 63) !== 0) {
+        return void 0;
+      }
+      if (Date.now() - metadata.mtimeMs > STALE_LOCK_MS) {
+        let entries;
+        try {
+          entries = await readdir(lockPath);
+        } catch (error) {
+          if (errorCode(error) === "ENOENT") continue;
+          return void 0;
+        }
+        if (entries.length === 0) {
+          await rmdir(lockPath).catch(() => void 0);
+          continue;
+        }
+        if (entries.length === 1) {
+          const ownerEntry = entries[0];
+          const staleOwnerToken = ownerEntry && LOCK_OWNER_PATTERN.exec(ownerEntry)?.[1];
+          if (ownerEntry && staleOwnerToken) {
+            const staleOwnerPath = path3.join(lockPath, ownerEntry);
+            try {
+              const ownerMetadata = await lstat2(staleOwnerPath);
+              const ownerOwned = typeof process.getuid !== "function" || ownerMetadata.uid === process.getuid();
+              if (ownerMetadata.isFile() && !ownerMetadata.isSymbolicLink() && ownerOwned && (ownerMetadata.mode & 63) === 0 && Date.now() - ownerMetadata.mtimeMs > STALE_LOCK_MS && ownerMetadata.size === staleOwnerToken.length && await readFile(staleOwnerPath, "utf8") === staleOwnerToken) {
+                await unlink(staleOwnerPath);
+                await rmdir(lockPath).catch(() => void 0);
+                continue;
+              }
+            } catch (error) {
+              if (errorCode(error) === "ENOENT") continue;
+              return void 0;
+            }
+          }
+        }
+      }
+      await delay(LOCK_POLL_MS);
+    }
+    return void 0;
+  } finally {
+    await handle?.close().catch(() => void 0);
+    if (!published && claimCreated) {
+      if (ownerCreated) {
+        await unlink(path3.join(claimPath, ownerName)).catch(() => void 0);
+      }
+      await rmdir(claimPath).catch(() => void 0);
+    }
   }
-  return void 0;
 }
 function errorCode(error) {
   return error !== null && typeof error === "object" && "code" in error ? String(error.code) : void 0;
+}
+function isLockContention(error) {
+  const code = errorCode(error);
+  return code === "EEXIST" || code === "ENOTEMPTY";
 }
 function observationPath(env = process.env) {
   const configured = env.SILMARIL_VSCODE_WORKSPACE_STATE?.trim();
