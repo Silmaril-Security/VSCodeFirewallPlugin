@@ -1,5 +1,18 @@
-import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir, stat } from "node:fs/promises";
+import { randomInt, randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+  stat,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -9,6 +22,8 @@ const MAX_FILE_BYTES = 64 * 1_024;
 const LOCK_WAIT_MS = 1_000;
 const LOCK_POLL_MS = 10;
 const STALE_LOCK_MS = 30_000;
+const LOCK_OWNER_PATTERN =
+  /^owner-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 type WorkspaceObservationV1 = {
   schemaVersion: 1;
@@ -84,36 +99,148 @@ export async function recordObservedWorkspace(
 async function acquireRegistryLock(destination: string): Promise<(() => Promise<void>) | undefined> {
   const lockPath = `${destination}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
+  const ownerName = `owner-${randomUUID()}`;
+  let recoveringDirectory: Stats | undefined;
   while (Date.now() <= deadline) {
+    let metadata: Stats;
+    let created = false;
     try {
       await mkdir(lockPath, { mode: 0o700 });
-      return async () => {
-        await rmdir(lockPath).catch(() => undefined);
-      };
+      created = true;
+      metadata = await lstat(lockPath);
     } catch (error) {
+      if (created) {
+        if (errorCode(error) === "ENOENT") continue;
+        return undefined;
+      }
       if (errorCode(error) !== "EEXIST") return undefined;
+      try {
+        metadata = await lstat(lockPath);
+      } catch (lstatError) {
+        if (errorCode(lstatError) === "ENOENT") continue;
+        return undefined;
+      }
     }
 
-    try {
-      const metadata = await lstat(lockPath);
-      const owned = typeof process.getuid !== "function" || metadata.uid === process.getuid();
-      if (
-        metadata.isDirectory()
-        && !metadata.isSymbolicLink()
-        && owned
-        && (metadata.mode & 0o077) === 0
-        && Date.now() - metadata.mtimeMs > STALE_LOCK_MS
-      ) {
-        await rmdir(lockPath).catch(() => undefined);
+    if (!isPrivateOwnedDirectory(metadata)) return undefined;
+
+    if (created) {
+      const result = await publishRegistryLockOwner(lockPath, metadata, ownerName);
+      if (result === "acquired") return registryLockRelease(lockPath, ownerName);
+      if (result === "abort") return undefined;
+      await delay(LOCK_POLL_MS);
+      continue;
+    }
+
+    if (Date.now() - metadata.mtimeMs > STALE_LOCK_MS
+      || (recoveringDirectory && sameDirectory(recoveringDirectory, metadata))) {
+      // A competing marker can refresh this directory's mtime. Keep recovery
+      // eligibility for the same stale generation while retries are bounded.
+      recoveringDirectory = metadata;
+      let entries: string[];
+      try {
+        entries = await readdir(lockPath);
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") continue;
+        return undefined;
+      }
+
+      for (const entry of entries) {
+        if (!LOCK_OWNER_PATTERN.test(entry)) continue;
+        const ownerPath = path.join(lockPath, entry);
+        try {
+          const ownerMetadata = await lstat(ownerPath);
+          // A replacement owner must independently be stale.
+          if (isPrivateOwnedDirectory(ownerMetadata)
+            && Date.now() - ownerMetadata.mtimeMs > STALE_LOCK_MS) {
+            await rmdir(ownerPath);
+          }
+        } catch (error) {
+          if (errorCode(error) !== "ENOENT") return undefined;
+        }
+      }
+      // Adopt the same stale directory after reclaiming any old markers.
+      // Keeping it in place prevents a competing legacy mkdir from succeeding.
+      if (entries.length === 0 || (await readdir(lockPath).catch(() => entries)).length === 0) {
+        const result = await publishRegistryLockOwner(lockPath, metadata, ownerName);
+        if (result === "acquired") return registryLockRelease(lockPath, ownerName);
+        if (result === "abort") return undefined;
+        // Stagger attempts when two recoverers both relinquished their markers.
+        await delay(LOCK_POLL_MS + randomInt(LOCK_POLL_MS));
         continue;
       }
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") continue;
-      return undefined;
     }
     await delay(LOCK_POLL_MS);
   }
   return undefined;
+}
+
+async function publishRegistryLockOwner(
+  lockPath: string,
+  observedDirectory: Stats,
+  ownerName: string,
+): Promise<"acquired" | "retry" | "abort"> {
+  const ownerPath = path.join(lockPath, ownerName);
+  try {
+    // mkdir publishes the whole marker atomically, even if the hook is interrupted.
+    await mkdir(ownerPath, { mode: 0o700 });
+  } catch (error) {
+    return errorCode(error) === "ENOENT" ? "retry" : "abort";
+  }
+
+  try {
+    const currentDirectory = await lstat(lockPath);
+    const entries = await readdir(lockPath);
+    if (sameDirectory(observedDirectory, currentDirectory)
+      && isPrivateOwnedDirectory(currentDirectory)
+      && entries.length === 1
+      && entries[0] === ownerName) {
+      return "acquired";
+    }
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") {
+      await rmdir(ownerPath).catch(() => undefined);
+      return "abort";
+    }
+  }
+
+  try {
+    await rmdir(ownerPath);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") return "abort";
+  }
+  return "retry";
+}
+
+function registryLockRelease(lockPath: string, ownerName: string): () => Promise<void> {
+  return async () => {
+    let removedOwner = false;
+    try {
+      await rmdir(path.join(lockPath, ownerName));
+      removedOwner = true;
+    } catch {
+      // A stale cleaner may already have removed this generation.
+    }
+    if (removedOwner) await rmdir(lockPath).catch(() => undefined);
+  };
+}
+
+function isPrivateOwnedDirectory(metadata: Stats): boolean {
+  const owned = typeof process.getuid !== "function" || metadata.uid === process.getuid();
+  return metadata.isDirectory()
+    && !metadata.isSymbolicLink()
+    && owned
+    && (metadata.mode & 0o077) === 0;
+}
+
+function sameDirectory(
+  observed: Stats,
+  current: Stats,
+): boolean {
+  return observed.dev === current.dev
+    && observed.ino !== 0
+    && observed.ino === current.ino
+    && observed.birthtimeMs === current.birthtimeMs;
 }
 
 function errorCode(error: unknown): string | undefined {

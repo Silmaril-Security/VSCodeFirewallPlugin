@@ -2025,8 +2025,20 @@ function booleanValue(value) {
 }
 
 // src/workspace-observation.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { chmod as chmod2, lstat as lstat2, mkdir as mkdir2, open as open2, readFile, realpath, rename as rename2, rm as rm2, rmdir, stat } from "node:fs/promises";
+import { randomInt, randomUUID as randomUUID3 } from "node:crypto";
+import {
+  chmod as chmod2,
+  lstat as lstat2,
+  mkdir as mkdir2,
+  open as open2,
+  readFile,
+  readdir,
+  realpath,
+  rename as rename2,
+  rm as rm2,
+  rmdir,
+  stat
+} from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
 import path3 from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2035,6 +2047,7 @@ var MAX_FILE_BYTES = 64 * 1024;
 var LOCK_WAIT_MS = 1e3;
 var LOCK_POLL_MS = 10;
 var STALE_LOCK_MS = 3e4;
+var LOCK_OWNER_PATTERN = /^owner-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 async function recordObservedWorkspace(cwd, env = process.env) {
   if (typeof cwd !== "string" || !path3.isAbsolute(cwd)) return;
   let resolved;
@@ -2091,29 +2104,112 @@ async function recordObservedWorkspace(cwd, env = process.env) {
 async function acquireRegistryLock(destination) {
   const lockPath = `${destination}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
+  const ownerName = `owner-${randomUUID3()}`;
+  let recoveringDirectory;
   while (Date.now() <= deadline) {
+    let metadata;
+    let created = false;
     try {
       await mkdir2(lockPath, { mode: 448 });
-      return async () => {
-        await rmdir(lockPath).catch(() => void 0);
-      };
+      created = true;
+      metadata = await lstat2(lockPath);
     } catch (error) {
+      if (created) {
+        if (errorCode(error) === "ENOENT") continue;
+        return void 0;
+      }
       if (errorCode(error) !== "EEXIST") return void 0;
+      try {
+        metadata = await lstat2(lockPath);
+      } catch (lstatError) {
+        if (errorCode(lstatError) === "ENOENT") continue;
+        return void 0;
+      }
     }
-    try {
-      const metadata = await lstat2(lockPath);
-      const owned = typeof process.getuid !== "function" || metadata.uid === process.getuid();
-      if (metadata.isDirectory() && !metadata.isSymbolicLink() && owned && (metadata.mode & 63) === 0 && Date.now() - metadata.mtimeMs > STALE_LOCK_MS) {
-        await rmdir(lockPath).catch(() => void 0);
+    if (!isPrivateOwnedDirectory(metadata)) return void 0;
+    if (created) {
+      const result = await publishRegistryLockOwner(lockPath, metadata, ownerName);
+      if (result === "acquired") return registryLockRelease(lockPath, ownerName);
+      if (result === "abort") return void 0;
+      await delay(LOCK_POLL_MS);
+      continue;
+    }
+    if (Date.now() - metadata.mtimeMs > STALE_LOCK_MS || recoveringDirectory && sameDirectory(recoveringDirectory, metadata)) {
+      recoveringDirectory = metadata;
+      let entries;
+      try {
+        entries = await readdir(lockPath);
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") continue;
+        return void 0;
+      }
+      for (const entry of entries) {
+        if (!LOCK_OWNER_PATTERN.test(entry)) continue;
+        const ownerPath = path3.join(lockPath, entry);
+        try {
+          const ownerMetadata = await lstat2(ownerPath);
+          if (isPrivateOwnedDirectory(ownerMetadata) && Date.now() - ownerMetadata.mtimeMs > STALE_LOCK_MS) {
+            await rmdir(ownerPath);
+          }
+        } catch (error) {
+          if (errorCode(error) !== "ENOENT") return void 0;
+        }
+      }
+      if (entries.length === 0 || (await readdir(lockPath).catch(() => entries)).length === 0) {
+        const result = await publishRegistryLockOwner(lockPath, metadata, ownerName);
+        if (result === "acquired") return registryLockRelease(lockPath, ownerName);
+        if (result === "abort") return void 0;
+        await delay(LOCK_POLL_MS + randomInt(LOCK_POLL_MS));
         continue;
       }
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") continue;
-      return void 0;
     }
     await delay(LOCK_POLL_MS);
   }
   return void 0;
+}
+async function publishRegistryLockOwner(lockPath, observedDirectory, ownerName) {
+  const ownerPath = path3.join(lockPath, ownerName);
+  try {
+    await mkdir2(ownerPath, { mode: 448 });
+  } catch (error) {
+    return errorCode(error) === "ENOENT" ? "retry" : "abort";
+  }
+  try {
+    const currentDirectory = await lstat2(lockPath);
+    const entries = await readdir(lockPath);
+    if (sameDirectory(observedDirectory, currentDirectory) && isPrivateOwnedDirectory(currentDirectory) && entries.length === 1 && entries[0] === ownerName) {
+      return "acquired";
+    }
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") {
+      await rmdir(ownerPath).catch(() => void 0);
+      return "abort";
+    }
+  }
+  try {
+    await rmdir(ownerPath);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") return "abort";
+  }
+  return "retry";
+}
+function registryLockRelease(lockPath, ownerName) {
+  return async () => {
+    let removedOwner = false;
+    try {
+      await rmdir(path3.join(lockPath, ownerName));
+      removedOwner = true;
+    } catch {
+    }
+    if (removedOwner) await rmdir(lockPath).catch(() => void 0);
+  };
+}
+function isPrivateOwnedDirectory(metadata) {
+  const owned = typeof process.getuid !== "function" || metadata.uid === process.getuid();
+  return metadata.isDirectory() && !metadata.isSymbolicLink() && owned && (metadata.mode & 63) === 0;
+}
+function sameDirectory(observed, current) {
+  return observed.dev === current.dev && observed.ino !== 0 && observed.ino === current.ino && observed.birthtimeMs === current.birthtimeMs;
 }
 function errorCode(error) {
   return error !== null && typeof error === "object" && "code" in error ? String(error.code) : void 0;
