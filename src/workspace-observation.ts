@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import {
   chmod,
@@ -100,6 +100,7 @@ async function acquireRegistryLock(destination: string): Promise<(() => Promise<
   const lockPath = `${destination}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   const ownerName = `owner-${randomUUID()}`;
+  let recoveringDirectory: Stats | undefined;
   while (Date.now() <= deadline) {
     let metadata: Stats;
     let created = false;
@@ -131,7 +132,11 @@ async function acquireRegistryLock(destination: string): Promise<(() => Promise<
       continue;
     }
 
-    if (Date.now() - metadata.mtimeMs > STALE_LOCK_MS) {
+    if (Date.now() - metadata.mtimeMs > STALE_LOCK_MS
+      || (recoveringDirectory && sameDirectory(recoveringDirectory, metadata))) {
+      // A competing marker can refresh this directory's mtime. Keep recovery
+      // eligibility for the same stale generation while retries are bounded.
+      recoveringDirectory = metadata;
       let entries: string[];
       try {
         entries = await readdir(lockPath);
@@ -160,6 +165,9 @@ async function acquireRegistryLock(destination: string): Promise<(() => Promise<
         const result = await publishRegistryLockOwner(lockPath, metadata, ownerName);
         if (result === "acquired") return registryLockRelease(lockPath, ownerName);
         if (result === "abort") return undefined;
+        // Stagger attempts when two recoverers both relinquished their markers.
+        await delay(LOCK_POLL_MS + randomInt(LOCK_POLL_MS));
+        continue;
       }
     }
     await delay(LOCK_POLL_MS);
@@ -229,7 +237,10 @@ function sameDirectory(
   observed: Stats,
   current: Stats,
 ): boolean {
-  return observed.dev === current.dev && observed.ino !== 0 && observed.ino === current.ino;
+  return observed.dev === current.dev
+    && observed.ino !== 0
+    && observed.ino === current.ino
+    && observed.birthtimeMs === current.birthtimeMs;
 }
 
 function errorCode(error: unknown): string | undefined {

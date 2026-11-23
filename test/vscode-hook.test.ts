@@ -972,19 +972,27 @@ test("workspace observations leave a live empty legacy lock inode untouched", as
   await assert.rejects(lstat(destination), { code: "ENOENT" });
 });
 
-test("workspace observations adopt a stale empty fixed registry lock", async () => {
+test("concurrent workspace observations both recover a stale empty fixed lock", async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-empty-"));
-  const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-empty-"));
+  const workspaces = await Promise.all([
+    mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-empty-a-")),
+    mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-empty-b-")),
+  ]);
   const destination = path.join(stateRoot, "observed-workspaces.json");
   const lockPath = `${destination}.lock`;
   await mkdir(lockPath, { mode: 0o700 });
   const staleTime = new Date(Date.now() - 31_000);
   await utimes(lockPath, staleTime, staleTime);
 
-  await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
+  await Promise.all(workspaces.map((workspace) =>
+    recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination }),
+  ));
 
   const parsed = JSON.parse(await readFile(destination, "utf8"));
-  assert.equal(parsed.workspaces[0].path, await realpath(workspace));
+  assert.deepEqual(
+    new Set(parsed.workspaces.map((workspace: { path: string }) => workspace.path)),
+    new Set(await Promise.all(workspaces.map((workspace) => realpath(workspace)))),
+  );
   await assert.rejects(lstat(lockPath), { code: "ENOENT" });
   assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json"]);
 });

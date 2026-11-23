@@ -2025,7 +2025,7 @@ function booleanValue(value) {
 }
 
 // src/workspace-observation.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomInt, randomUUID as randomUUID3 } from "node:crypto";
 import {
   chmod as chmod2,
   lstat as lstat2,
@@ -2105,6 +2105,7 @@ async function acquireRegistryLock(destination) {
   const lockPath = `${destination}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   const ownerName = `owner-${randomUUID3()}`;
+  let recoveringDirectory;
   while (Date.now() <= deadline) {
     let metadata;
     let created = false;
@@ -2133,7 +2134,8 @@ async function acquireRegistryLock(destination) {
       await delay(LOCK_POLL_MS);
       continue;
     }
-    if (Date.now() - metadata.mtimeMs > STALE_LOCK_MS) {
+    if (Date.now() - metadata.mtimeMs > STALE_LOCK_MS || recoveringDirectory && sameDirectory(recoveringDirectory, metadata)) {
+      recoveringDirectory = metadata;
       let entries;
       try {
         entries = await readdir(lockPath);
@@ -2157,6 +2159,8 @@ async function acquireRegistryLock(destination) {
         const result = await publishRegistryLockOwner(lockPath, metadata, ownerName);
         if (result === "acquired") return registryLockRelease(lockPath, ownerName);
         if (result === "abort") return void 0;
+        await delay(LOCK_POLL_MS + randomInt(LOCK_POLL_MS));
+        continue;
       }
     }
     await delay(LOCK_POLL_MS);
@@ -2205,7 +2209,7 @@ function isPrivateOwnedDirectory(metadata) {
   return metadata.isDirectory() && !metadata.isSymbolicLink() && owned && (metadata.mode & 63) === 0;
 }
 function sameDirectory(observed, current) {
-  return observed.dev === current.dev && observed.ino !== 0 && observed.ino === current.ino;
+  return observed.dev === current.dev && observed.ino !== 0 && observed.ino === current.ino && observed.birthtimeMs === current.birthtimeMs;
 }
 function errorCode(error) {
   return error !== null && typeof error === "object" && "code" in error ? String(error.code) : void 0;
