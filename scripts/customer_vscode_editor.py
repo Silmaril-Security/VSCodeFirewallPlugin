@@ -80,10 +80,12 @@ def qa_directories():
     return root, *paths
 
 
-def verify_editor(managed):
+def verify_editor(managed, *, guest=False):
     version = VERSIONS[managed]
     # Two releases can coexist; admit only an Apple-verified Microsoft signed app at the exact version.
     options = [Path(f"/Applications/VSCode-QA-{version}.app"), Path("/Applications/Visual Studio Code.app")]
+    if guest:
+        options.append(Path.home() / "Applications" / f"VSCode-QA-{version}.app")
     for app in options:
         if app.resolve() != app or not app.is_dir():
             continue
@@ -96,7 +98,8 @@ def verify_editor(managed):
         run("/usr/bin/codesign", "--verify", "--strict", "-R", rule, app)
         run("/usr/sbin/spctl", "--assess", "--type", "execute", app)
         return app / "Contents/MacOS" / info["CFBundleExecutable"]
-    raise PhysicalHostUnavailable(f"Provision signed Microsoft VS Code {version} in /Applications")
+    locations = "/Applications or ~/Applications" if guest else "/Applications"
+    raise PhysicalHostUnavailable(f"Provision signed Microsoft VS Code {version} in {locations}")
 
 
 def stage_profile(template, target, plugin):
@@ -367,11 +370,11 @@ def installed_hook_launcher(account_home, home, managed):
 
 def journey(home, plugin, managed, version, checks, *, controlled=None):
     account_home, seed, workspace = qa_directories()
-    binary = verify_editor(managed)
+    binary = verify_editor(managed, guest=controlled is not None)
     profile = home / DATA
     stage_profile(seed, profile, plugin)
     if controlled:
-        fixture, url = controlled
+        fixture, url, certificate = controlled
         key = fixture.key
     else:
         fixture = None
@@ -396,6 +399,8 @@ def journey(home, plugin, managed, version, checks, *, controlled=None):
            "SILMARIL_CONFIG_PATH": str(config),
            "SILMARIL_LOCAL_EVENT_DIR": str(home / EVIDENCE),
            "SILMARIL_VSCODE_WORKSPACE_STATE": str(home / "observed-workspaces.json")}
+    if controlled and not managed:
+        env["NODE_EXTRA_CA_CERTS"] = str(certificate)
     if managed:
         env.update(SILMARIL_API_URL=url, SILMARIL_API_KEY=key, SILMARIL_MODE="block")
     spool_dirs = {home / EVIDENCE}

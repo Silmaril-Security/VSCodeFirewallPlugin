@@ -113,6 +113,17 @@ def fingerprint(root):
     return result
 
 
+def configure_guest_node(home):
+    # The standalone launcher requires a private locator and a root- or QA-owned Node.
+    user_node = Path.home() / ".local/bin/node"
+    node = user_node if user_node.is_file() else shutil.which("node")
+    if not node:
+        raise PhysicalHostUnavailable("The guest requires Node.js for the standalone payload")
+    locator = home / NODE
+    locator.chmod(0o600)
+    locator.write_text(str(Path(node).resolve(strict=True)) + "\n")
+
+
 def guest():
     from customer_vscode_editor import journey
     if not subprocess.check_output(["/usr/sbin/sysctl", "-n", "hw.model"]).startswith(b"Virtual"):
@@ -125,14 +136,11 @@ def guest():
         if fingerprint(home) != spec["files"]:
             raise ValueError("Guest release payload differs from the staged artifact")
         if not managed:
-            node = shutil.which("node")
-            if not node:
-                raise PhysicalHostUnavailable("The guest requires Node.js for the standalone payload")
-            (home / NODE).write_text(str(Path(node).resolve()) + "\n")
+            configure_guest_node(home)
         with classifier() as (fixture, url):
             checks = {}
             journey(home, home / PLUGIN, managed, spec["version"], checks,
-                    controlled=(fixture, url))
+                    controlled=(fixture, url, LAB / "localhost.crt"))
             if checks.get("native") != "PASS":
                 raise PhysicalHostUnavailable("Guest signed-editor allow control did not pass")
             print(json.dumps({"run": spec["run"], "checks": {k: checks[k] for k in BOUNDARIES}}))

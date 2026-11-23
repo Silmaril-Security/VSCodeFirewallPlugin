@@ -7,11 +7,27 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import customer_vscode_denials as denials
-from customer_vscode_denials import Decisions
+from customer_vscode_denials import Decisions, NODE, configure_guest_node
 from macos_release_lease import PhysicalHostUnavailable
 
 
 class ControlledDenials(unittest.TestCase):
+    def test_guest_rewrites_shared_locator_with_private_permissions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            account = Path(temp).resolve()
+            node = account / ".local/bin/node"
+            node.parent.mkdir(parents=True)
+            node.touch(mode=0o755)
+            run = account / "run"
+            locator = run / NODE
+            locator.parent.mkdir(parents=True)
+            locator.write_text("/host/node\n")
+            locator.chmod(0o644)
+            with patch.object(Path, "home", return_value=account):
+                configure_guest_node(run)
+            self.assertEqual(locator.read_text(), f"{node}\n")
+            self.assertEqual(locator.stat().st_mode & 0o777, 0o600)
+
     def test_only_the_armed_boundary_and_marker_produce_a_deny(self):
         for scenario, hook in (("prompt_denial", "USER_INPUT"), ("pre_tool_denial", "TOOL_CALL"),
                                ("post_tool_denial", "TOOL_RESPONSE")):
