@@ -955,7 +955,41 @@ test("concurrent workspace observations preserve every workspace", async () => {
   assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json"]);
 });
 
-test("workspace observations recover a stale generation-owned registry lock", async () => {
+test("workspace observations leave a live empty legacy lock inode untouched", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-legacy-"));
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-legacy-"));
+  const destination = path.join(stateRoot, "observed-workspaces.json");
+  const lockPath = `${destination}.lock`;
+  await mkdir(lockPath, { mode: 0o700 });
+  const before = await lstat(lockPath);
+
+  await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
+
+  const after = await lstat(lockPath);
+  assert.equal(after.dev, before.dev);
+  assert.equal(after.ino, before.ino);
+  assert.deepEqual(await readdir(lockPath), []);
+  await assert.rejects(lstat(destination), { code: "ENOENT" });
+});
+
+test("workspace observations adopt a stale empty fixed registry lock", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-empty-"));
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-empty-"));
+  const destination = path.join(stateRoot, "observed-workspaces.json");
+  const lockPath = `${destination}.lock`;
+  await mkdir(lockPath, { mode: 0o700 });
+  const staleTime = new Date(Date.now() - 31_000);
+  await utimes(lockPath, staleTime, staleTime);
+
+  await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
+
+  const parsed = JSON.parse(await readFile(destination, "utf8"));
+  assert.equal(parsed.workspaces[0].path, await realpath(workspace));
+  await assert.rejects(lstat(lockPath), { code: "ENOENT" });
+  assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json"]);
+});
+
+test("workspace observations recover interrupted generation markers", async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-stale-"));
   const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-stale-"));
   const destination = path.join(stateRoot, "observed-workspaces.json");
@@ -963,9 +997,12 @@ test("workspace observations recover a stale generation-owned registry lock", as
   const ownerToken = "00000000-0000-4000-8000-000000000001";
   const ownerPath = path.join(lockPath, `owner-${ownerToken}`);
   await mkdir(lockPath, { mode: 0o700 });
-  await writeFile(ownerPath, ownerToken, { mode: 0o600 });
+  await mkdir(ownerPath, { mode: 0o700 });
   const staleTime = new Date(Date.now() - 31_000);
   await utimes(ownerPath, staleTime, staleTime);
+  const otherOwner = path.join(lockPath, "owner-00000000-0000-4000-8000-000000000003");
+  await mkdir(otherOwner, { mode: 0o700 });
+  await utimes(otherOwner, staleTime, staleTime);
   await utimes(lockPath, staleTime, staleTime);
 
   await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
@@ -984,13 +1021,13 @@ test("workspace observations retain a fresh owner in an old-looking lock directo
   const ownerToken = "00000000-0000-4000-8000-000000000002";
   const ownerPath = path.join(lockPath, `owner-${ownerToken}`);
   await mkdir(lockPath, { mode: 0o700 });
-  await writeFile(ownerPath, ownerToken, { mode: 0o600 });
+  await mkdir(ownerPath, { mode: 0o700 });
   const staleTime = new Date(Date.now() - 31_000);
   await utimes(lockPath, staleTime, staleTime);
 
   await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
 
-  assert.equal(await readFile(ownerPath, "utf8"), ownerToken);
+  assert.deepEqual(await readdir(ownerPath), []);
   await assert.rejects(lstat(destination), { code: "ENOENT" });
   assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json.lock"]);
 });
