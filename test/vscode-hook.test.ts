@@ -1098,7 +1098,7 @@ test("workspace observations retain a fresh owner in an old-looking lock directo
   assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json.lock"]);
 });
 
-test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", async () => {
+test("SDK 0.11.0 emits canonical agent, tool, and MCP resource wire shapes", async () => {
   const requests: Array<Record<string, any>> = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -1167,7 +1167,7 @@ test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", asyn
       resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
     },
   );
-  assert.equal(firstMcpRequest.metadata.silmaril.sdk_version, "0.8.2");
+  assert.equal(firstMcpRequest.metadata.silmaril.sdk_version, "0.11.0");
   assert.equal(firstMcpRequest.metadata.vscodeHookRuntime, "local");
   assert.equal(Object.hasOwn(firstMcpRequest.resource, "parentId"), false);
   assert.equal(
@@ -1205,11 +1205,11 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     new URL("../scripts/customer-published-acceptance", import.meta.url),
     "utf8",
   );
-  assert.equal(packageJson.version, "0.3.2");
+  assert.equal(packageJson.version, "0.3.3");
   assert.equal(pluginJson.$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
   assert.equal(pluginJson.name, "silmaril-vscode-firewall");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.11.0");
   assert.equal(hooks.version, 1);
   assert.deepEqual(Object.keys(hooks.hooks), [
     "sessionStart",
