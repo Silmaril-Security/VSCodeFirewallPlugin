@@ -1231,9 +1231,8 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
   assert.match(launcher, /\[ -L "\$\{runtime_file\}" \]/u);
   assert.match(launcher, /\[ -L "\$\{node_path\}" \]/u);
   assert.match(launcher, /"\$@"/u);
-  assert.match(releaseWorkflow, /needs\.plan\.outputs\.version == '0\.3\.1'/u);
-  assert.match(releaseWorkflow, /needs\.plan\.outputs\.version == '0\.3\.2'/u);
-  assert.match(customerAcceptance, /version in \("0\.3\.1", "0\.3\.2"\)/u);
+  assert.doesNotMatch(releaseWorkflow, /publication hold/iu);
+  assert.doesNotMatch(customerAcceptance, /publication_hold/u);
 });
 
 test("private launcher safely handles plugin paths with spaces and both CLI forms", async () => {

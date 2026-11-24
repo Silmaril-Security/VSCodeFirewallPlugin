@@ -113,6 +113,17 @@ def fingerprint(root):
     return result
 
 
+def configure_guest_node(home):
+    # The standalone launcher requires a private locator and a root- or QA-owned Node.
+    user_node = Path.home() / ".local/bin/node"
+    node = user_node if user_node.is_file() else shutil.which("node")
+    if not node:
+        raise PhysicalHostUnavailable("The guest requires Node.js for the standalone payload")
+    locator = home / NODE
+    locator.chmod(0o600)
+    locator.write_text(str(Path(node).resolve(strict=True)) + "\n")
+
+
 def guest():
     from customer_vscode_editor import journey
     if not subprocess.check_output(["/usr/sbin/sysctl", "-n", "hw.model"]).startswith(b"Virtual"):
@@ -125,14 +136,11 @@ def guest():
         if fingerprint(home) != spec["files"]:
             raise ValueError("Guest release payload differs from the staged artifact")
         if not managed:
-            node = shutil.which("node")
-            if not node:
-                raise PhysicalHostUnavailable("The guest requires Node.js for the standalone payload")
-            (home / NODE).write_text(str(Path(node).resolve()) + "\n")
+            configure_guest_node(home)
         with classifier() as (fixture, url):
             checks = {}
             journey(home, home / PLUGIN, managed, spec["version"], checks,
-                    controlled=(fixture, url))
+                    controlled=(fixture, url, LAB / "localhost.crt"))
             if checks.get("native") != "PASS":
                 raise PhysicalHostUnavailable("Guest signed-editor allow control did not pass")
             print(json.dumps({"run": spec["run"], "checks": {k: checks[k] for k in BOUNDARIES}}))
@@ -166,9 +174,11 @@ def published_denials(home, managed, version):
         # Tart runs exec in the current console user's session. The guest validates its QA identity.
         result = subprocess.run([tart, "exec", GUEST, "/usr/bin/python3", exe],
                                 capture_output=True, env=env, timeout=1100)
+        if result.returncode == 75:
+            # The guest reports exactly one fixed prerequisite message on this exit.
+            reason = result.stderr.decode(errors="replace").strip().splitlines()[-1:]
+            raise PhysicalHostUnavailable("Guest prerequisite unavailable: " + "".join(reason)[:300])
         if result.returncode:
-            if result.returncode == 75:
-                raise PhysicalHostUnavailable("Guest signed editor or QA login unavailable")
             raise ValueError("Guest denial journey did not produce a complete receipt")
         receipt = json.loads(result.stdout)
         checks = receipt["checks"]

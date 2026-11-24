@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import customer_vscode_denials as denials
 import customer_vscode_editor as driver
 
 
@@ -117,6 +118,26 @@ class EditorObservationTests(unittest.TestCase):
                 self.assertEqual(checks["native"], "FAIL")
                 self.assertEqual(checks["live"], "BLOCKED")
                 self.assertEqual(log.getvalue(), f"Editor acceptance failed during {label} (exit 1)\n")
+
+    def test_guest_prerequisite_reaches_the_log_and_other_guest_failures_stay_redacted(self):
+        def live(home, plugin, managed, version, checks):
+            checks.update(install="PASS", native="PASS", live="PASS")
+
+        cases = (
+            (driver.PhysicalHostUnavailable("Guest prerequisite unavailable: The guest requires Node.js for the standalone payload"),
+             "Guest prerequisite unavailable: The guest requires Node.js for the standalone payload\n", "BLOCKED"),
+            (ValueError("Guest denial journey did not produce a complete receipt"),
+             "Controlled denial journey failed (ValueError)\n", "FAIL"),
+        )
+        for error, expected, verdict in cases:
+            with self.subTest(error=type(error).__name__):
+                log = io.StringIO()
+                with patch.object(driver, "journey", side_effect=live), \
+                        patch.object(denials, "published_denials", side_effect=error), redirect_stderr(log):
+                    checks = driver.run_editor_checks(None, None, False, "0.3.2")
+                self.assertEqual(log.getvalue(), expected)
+                self.assertEqual(checks["live"], "PASS")
+                self.assertEqual(checks["policy_denial"], verdict)
 
     def test_workbench_turn_requires_its_own_sdk_mapping(self):
         with tempfile.TemporaryDirectory() as temp:

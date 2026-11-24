@@ -36,8 +36,8 @@ successful tool-result text without reading transcripts.
 ## Requirements
 
 Release [v0.3.0](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.0)
-remains immutable. Current source is the unreleased 0.3.2 candidate, which
-supersedes the unreleased 0.3.1 candidate and carries its publication hold.
+remains immutable. Current source is the 0.3.2 candidate, which supersedes the
+unreleased 0.3.1 candidate.
 Installation remains a managed local macOS operation owned by SilmarilMacOS,
 whose separately hashed adapter manifest invokes the signed Silmaril runtime.
 That managed adapter must implement the same event contract but is not

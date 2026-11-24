@@ -6,7 +6,7 @@
   `userPromptSubmitted` callbacks in both direct and dispatcher paths.
 - Keep submitted-prompt callbacks classification-free and fail open when
   workspace observation fails.
-- Supersede the unreleased 0.3.1 candidate and carry its publication hold.
+- Supersede the unreleased 0.3.1 candidate.
 
 ## 0.3.1 - Unreleased
 
