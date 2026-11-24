@@ -997,7 +997,7 @@ test("concurrent workspace observations both recover a stale empty fixed lock", 
   assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json"]);
 });
 
-test("workspace observations recover interrupted generation markers", async () => {
+test("workspace observations recover interrupted pre-PID generation markers", async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-stale-"));
   const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-stale-"));
   const destination = path.join(stateRoot, "observed-workspaces.json");
@@ -1019,6 +1019,64 @@ test("workspace observations recover interrupted generation markers", async () =
   assert.equal(parsed.workspaces[0].path, await realpath(workspace));
   await assert.rejects(lstat(lockPath), { code: "ENOENT" });
   assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json"]);
+});
+
+test("workspace observations recover an aged owner whose PID is dead", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-dead-"));
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-dead-"));
+  const destination = path.join(stateRoot, "observed-workspaces.json");
+  const lockPath = `${destination}.lock`;
+  const deadPid = 2_147_483_647;
+  assert.throws(() => process.kill(deadPid, 0), { code: "ESRCH" });
+  const ownerName = `owner-${deadPid}-00000000-0000-4000-8000-000000000004`;
+  const ownerPath = path.join(lockPath, ownerName);
+  await mkdir(lockPath, { mode: 0o700 });
+  await mkdir(ownerPath, { mode: 0o700 });
+  const staleTime = new Date(Date.now() - 31_000);
+  await utimes(ownerPath, staleTime, staleTime);
+  await utimes(lockPath, staleTime, staleTime);
+
+  await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
+
+  const parsed = JSON.parse(await readFile(destination, "utf8"));
+  assert.equal(parsed.workspaces[0].path, await realpath(workspace));
+  await assert.rejects(lstat(lockPath), { code: "ENOENT" });
+  assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json"]);
+});
+
+test("workspace observations preserve the registry behind an aged live owner", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-workspace-live-"));
+  const previousWorkspace = await mkdtemp(
+    path.join(os.tmpdir(), "silmaril-vscode-project-live-previous-"),
+  );
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "silmaril-vscode-project-live-new-"));
+  const destination = path.join(stateRoot, "observed-workspaces.json");
+  const registry = JSON.stringify({
+    schemaVersion: 1,
+    workspaces: [{
+      path: await realpath(previousWorkspace),
+      lastObservedAt: "2026-01-01T00:00:00.000Z",
+    }],
+  });
+  await writeFile(destination, registry, { mode: 0o600 });
+  const lockPath = `${destination}.lock`;
+  const ownerName =
+    `owner-${process.pid}-00000000-0000-4000-8000-000000000005`;
+  const ownerPath = path.join(lockPath, ownerName);
+  await mkdir(lockPath, { mode: 0o700 });
+  await mkdir(ownerPath, { mode: 0o700 });
+  const staleTime = new Date(Date.now() - 31_000);
+  await utimes(ownerPath, staleTime, staleTime);
+  await utimes(lockPath, staleTime, staleTime);
+
+  await recordObservedWorkspace(workspace, { SILMARIL_VSCODE_WORKSPACE_STATE: destination });
+
+  assert.equal(await readFile(destination, "utf8"), registry);
+  assert.deepEqual(await readdir(lockPath), [ownerName]);
+  assert.deepEqual(
+    (await readdir(stateRoot)).sort(),
+    ["observed-workspaces.json", "observed-workspaces.json.lock"],
+  );
 });
 
 test("workspace observations retain a fresh owner in an old-looking lock directory", async () => {

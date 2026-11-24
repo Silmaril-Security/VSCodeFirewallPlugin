@@ -2047,7 +2047,9 @@ var MAX_FILE_BYTES = 64 * 1024;
 var LOCK_WAIT_MS = 1e3;
 var LOCK_POLL_MS = 10;
 var STALE_LOCK_MS = 3e4;
-var LOCK_OWNER_PATTERN = /^owner-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+var MAX_PROCESS_PID = 2147483647;
+var PID_LOCK_OWNER_PATTERN = /^owner-([1-9][0-9]{0,9})-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
+var LEGACY_LOCK_OWNER_PATTERN = /^owner-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 async function recordObservedWorkspace(cwd, env = process.env) {
   if (typeof cwd !== "string" || !path3.isAbsolute(cwd)) return;
   let resolved;
@@ -2104,7 +2106,7 @@ async function recordObservedWorkspace(cwd, env = process.env) {
 async function acquireRegistryLock(destination) {
   const lockPath = `${destination}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
-  const ownerName = `owner-${randomUUID3()}`;
+  const ownerName = `owner-${process.pid}-${randomUUID3()}`;
   let recoveringDirectory;
   while (Date.now() <= deadline) {
     let metadata;
@@ -2144,11 +2146,12 @@ async function acquireRegistryLock(destination) {
         return void 0;
       }
       for (const entry of entries) {
-        if (!LOCK_OWNER_PATTERN.test(entry)) continue;
+        const owner = parseLockOwner(entry);
+        if (!owner) continue;
         const ownerPath = path3.join(lockPath, entry);
         try {
           const ownerMetadata = await lstat2(ownerPath);
-          if (isPrivateOwnedDirectory(ownerMetadata) && Date.now() - ownerMetadata.mtimeMs > STALE_LOCK_MS) {
+          if (isPrivateOwnedDirectory(ownerMetadata) && Date.now() - ownerMetadata.mtimeMs > STALE_LOCK_MS && (owner.kind === "legacy" || !processExists(owner.pid))) {
             await rmdir(ownerPath);
           }
         } catch (error) {
@@ -2213,6 +2216,24 @@ function sameDirectory(observed, current) {
 }
 function errorCode(error) {
   return error !== null && typeof error === "object" && "code" in error ? String(error.code) : void 0;
+}
+function parseLockOwner(entry) {
+  if (LEGACY_LOCK_OWNER_PATTERN.test(entry)) return { kind: "legacy" };
+  const match = PID_LOCK_OWNER_PATTERN.exec(entry);
+  if (!match) return void 0;
+  const pid = Number(match[1]);
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > MAX_PROCESS_PID || String(pid) !== match[1]) {
+    return void 0;
+  }
+  return { kind: "pid", pid };
+}
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) !== "ESRCH";
+  }
 }
 function observationPath(env = process.env) {
   const configured = env.SILMARIL_VSCODE_WORKSPACE_STATE?.trim();
