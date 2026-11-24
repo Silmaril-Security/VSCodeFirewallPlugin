@@ -22,7 +22,10 @@ const MAX_FILE_BYTES = 64 * 1_024;
 const LOCK_WAIT_MS = 1_000;
 const LOCK_POLL_MS = 10;
 const STALE_LOCK_MS = 30_000;
-const LOCK_OWNER_PATTERN =
+const MAX_PROCESS_PID = 2_147_483_647;
+const PID_LOCK_OWNER_PATTERN =
+  /^owner-([1-9][0-9]{0,9})-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
+const LEGACY_LOCK_OWNER_PATTERN =
   /^owner-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 type WorkspaceObservationV1 = {
@@ -99,7 +102,7 @@ export async function recordObservedWorkspace(
 async function acquireRegistryLock(destination: string): Promise<(() => Promise<void>) | undefined> {
   const lockPath = `${destination}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
-  const ownerName = `owner-${randomUUID()}`;
+  const ownerName = `owner-${process.pid}-${randomUUID()}`;
   let recoveringDirectory: Stats | undefined;
   while (Date.now() <= deadline) {
     let metadata: Stats;
@@ -146,13 +149,17 @@ async function acquireRegistryLock(destination: string): Promise<(() => Promise<
       }
 
       for (const entry of entries) {
-        if (!LOCK_OWNER_PATTERN.test(entry)) continue;
+        const owner = parseLockOwner(entry);
+        if (!owner) continue;
         const ownerPath = path.join(lockPath, entry);
         try {
           const ownerMetadata = await lstat(ownerPath);
-          // A replacement owner must independently be stale.
+          // Pre-PID owners retain the age-only recovery behavior. PID owners
+          // are recoverable only when signal 0 proves their process is gone.
+          // A reused PID is intentionally treated as a live owner.
           if (isPrivateOwnedDirectory(ownerMetadata)
-            && Date.now() - ownerMetadata.mtimeMs > STALE_LOCK_MS) {
+            && Date.now() - ownerMetadata.mtimeMs > STALE_LOCK_MS
+            && (owner.kind === "legacy" || !processExists(owner.pid))) {
             await rmdir(ownerPath);
           }
         } catch (error) {
@@ -247,6 +254,32 @@ function errorCode(error: unknown): string | undefined {
   return error !== null && typeof error === "object" && "code" in error
     ? String(error.code)
     : undefined;
+}
+
+function parseLockOwner(
+  entry: string,
+): { kind: "legacy" } | { kind: "pid"; pid: number } | undefined {
+  if (LEGACY_LOCK_OWNER_PATTERN.test(entry)) return { kind: "legacy" };
+  const match = PID_LOCK_OWNER_PATTERN.exec(entry);
+  if (!match) return undefined;
+  const pid = Number(match[1]);
+  if (!Number.isSafeInteger(pid)
+    || pid < 1
+    || pid > MAX_PROCESS_PID
+    || String(pid) !== match[1]) {
+    return undefined;
+  }
+  return { kind: "pid", pid };
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM and unknown failures cannot prove that the process exited.
+    return errorCode(error) !== "ESRCH";
+  }
 }
 
 export function observationPath(
