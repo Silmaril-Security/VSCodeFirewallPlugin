@@ -174,12 +174,12 @@ def published_denials(home, managed, version):
         # Tart runs exec in the current console user's session. The guest validates its QA identity.
         result = subprocess.run([tart, "exec", GUEST, "/usr/bin/python3", exe],
                                 capture_output=True, env=env, timeout=1100)
-        if result.returncode:
+        if result.returncode == 75:
+            # The guest reports exactly one fixed prerequisite message on this exit.
             reason = result.stderr.decode(errors="replace").strip().splitlines()[-1:]
-            detail = f": {reason[0][:300]}" if reason else ""
-            if result.returncode == 75:
-                raise PhysicalHostUnavailable("Guest signed editor or QA login unavailable" + detail)
-            raise ValueError("Guest denial journey did not produce a complete receipt" + detail)
+            raise PhysicalHostUnavailable("Guest prerequisite unavailable: " + "".join(reason)[:300])
+        if result.returncode:
+            raise ValueError("Guest denial journey did not produce a complete receipt")
         receipt = json.loads(result.stdout)
         checks = receipt["checks"]
         if (receipt.get("run") != spec["run"] or set(checks) != set(BOUNDARIES)

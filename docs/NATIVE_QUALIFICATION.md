@@ -464,12 +464,13 @@ and failed execution remain failed and cannot establish native qualification.
 ## Managed macOS propagation
 
 The candidate admission floor is 1.145.2, but it is not a qualified supported
-floor. Publication and managed propagation remain gated on a native matrix
-pass that preserves the strict title-request and post-tool-poison oracles. The
-shared transformed-prompt and `modifiedResult` contracts remain source-only
-until a supported shared Agent Host route proves them. Do not publish either
-0.3.1 or 0.3.2, and do not modify or relabel 0.3.0. The failed 0.3.1
-observations remain historical and do not qualify the current 0.3.2 package.
+floor. Managed propagation remains gated on a native matrix pass that preserves
+the strict title-request and post-tool-poison oracles. The shared
+transformed-prompt and `modifiedResult` contracts remain source-only until a
+supported shared Agent Host route proves them. Standalone 0.3.2 publishes
+through customer release acceptance. 0.3.1 stays unreleased, and 0.3.0 is not
+modified or relabelled. The failed 0.3.1 observations remain historical and do
+not qualify the 0.3.2 package.
 
 ## Release acceptance on MacStadium
 
@@ -483,4 +484,4 @@ The live check uses Atlanta's managed profile and the normal Test Tenant HTTPS e
 
 The three denial cases run in the Atlanta Tart guest `vscode-denial-lab`. Its signed reference editor uses a separately provisioned standard Aqua QA login and trusted QA workspace. The guest also accepts the versioned Microsoft editor under the QA user’s `~/Applications/VSCode-QA-<version>.app`, with the same version, signing identity and Gatekeeper checks. For standalone tests the guest uses the QA user’s `~/.local/bin/node` if installed, otherwise the Node executable on its path. Use a root- or QA-owned Node.js 22 or later. Only the staged release files and driver enter the guest through the read-only `input` share. A guest-local TLS classifier binds an ephemeral port on 127.0.0.1 and authenticates requests with a random per-run key. For each case it denies only the corresponding hook and fresh prompt, filename or file-content marker. Acceptance requires the classifier's matching session, the installed hook's receipt and the signed editor's observable response. The published `live` check comes exclusively from Test Tenant A. The `prompt_denial`, `pre_tool_denial` and `post_tool_denial` checks come exclusively from the guest.
 
-Each denial requires a fresh installed-hook record for the exact session and the corresponding effect in the signed client's ordinary session history. Prompt replacement must replace the submitted request and prevent the requested read. For pre-tool denial and post-tool replacement, the client must show the returned denial reason and withhold the file's randomly generated value. Missing test policy, login, normal workspace trust, model entitlement or an observable client effect leaves the corresponding checks blocked. The aggregate `policy_denial` requires all three. The standalone publication holds for historical candidate 0.3.1 and current candidate 0.3.2, and the native qualification matrix above, still apply.
+Each denial requires a fresh installed-hook record for the exact session and the corresponding effect in the signed client's ordinary session history. Prompt replacement must replace the submitted request and prevent the requested read. For pre-tool denial and post-tool replacement, the client must show the returned denial reason and withhold the file's randomly generated value. Missing test policy, login, normal workspace trust, model entitlement or an observable client effect leaves the corresponding checks blocked. The aggregate `policy_denial` requires all three. The native qualification matrix above still applies.

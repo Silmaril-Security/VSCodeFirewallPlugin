@@ -61,18 +61,16 @@ class GuestFailureReason(unittest.TestCase):
             with patch.object(denials, "LAB", lab), patch.object(denials.subprocess, "run", return_value=result):
                 denials.published_denials(home, False, "0.3.2")
 
-    def test_unavailable_guest_reports_its_reason(self):
-        stderr = b"Provision signed Microsoft VS Code 1.145.2 in /Applications\n"
+    def test_unavailable_guest_reports_its_prerequisite(self):
+        stderr = b"Provision signed Microsoft VS Code 1.145.2 in /Applications or ~/Applications\n"
         with self.assertRaisesRegex(
             PhysicalHostUnavailable,
-            r"^Guest signed editor or QA login unavailable: Provision signed Microsoft VS Code 1\.145\.2 in /Applications$",
+            r"^Guest prerequisite unavailable: Provision signed Microsoft VS Code 1\.145\.2 in /Applications or ~/Applications$",
         ):
             self.published_denials(75, stderr)
 
-    def test_failed_guest_reports_its_final_error_line(self):
-        stderr = b"Traceback (most recent call last):\nValueError: Guest release payload differs from the staged artifact\n"
-        with self.assertRaisesRegex(
-            ValueError,
-            r"^Guest denial journey did not produce a complete receipt: ValueError: Guest release payload differs",
-        ):
+    def test_failed_guest_output_stays_out_of_the_error(self):
+        stderr = b"Traceback (most recent call last):\nCalledProcessError: Command ['code', 'private prompt'] failed\n"
+        with self.assertRaises(ValueError) as raised:
             self.published_denials(1, stderr)
+        self.assertEqual(str(raised.exception), "Guest denial journey did not produce a complete receipt")
