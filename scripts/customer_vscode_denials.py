@@ -167,9 +167,11 @@ def published_denials(home, managed, version):
         result = subprocess.run([tart, "exec", GUEST, "/usr/bin/python3", exe],
                                 capture_output=True, env=env, timeout=1100)
         if result.returncode:
+            reason = result.stderr.decode(errors="replace").strip().splitlines()[-1:]
+            detail = f": {reason[0][:300]}" if reason else ""
             if result.returncode == 75:
-                raise PhysicalHostUnavailable("Guest signed editor or QA login unavailable")
-            raise ValueError("Guest denial journey did not produce a complete receipt")
+                raise PhysicalHostUnavailable("Guest signed editor or QA login unavailable" + detail)
+            raise ValueError("Guest denial journey did not produce a complete receipt" + detail)
         receipt = json.loads(result.stdout)
         checks = receipt["checks"]
         if (receipt.get("run") != spec["run"] or set(checks) != set(BOUNDARIES)
