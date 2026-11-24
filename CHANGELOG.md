@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.3.2 - Unreleased
+## 0.3.3
+
+- Bundle SDK 0.11.0, whose outcome taxonomy names the tenant acceptable-use
+  policy outcome `abuse`, and which rejects classifier responses without a
+  numeric `score` and `threshold` from 0 through 1. A rejected response is a
+  classification error and returns `{}`.
+
+## 0.3.2
 
 - Record the supplied workspace for validated shared Copilot
   `userPromptSubmitted` callbacks in both direct and dispatcher paths.

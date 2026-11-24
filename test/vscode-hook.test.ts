@@ -1098,7 +1098,7 @@ test("workspace observations retain a fresh owner in an old-looking lock directo
   assert.deepEqual(await readdir(stateRoot), ["observed-workspaces.json.lock"]);
 });
 
-test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", async () => {
+test("SDK 0.11.0 emits canonical agent, tool, and MCP resource wire shapes", async () => {
   const requests: Array<Record<string, any>> = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -1167,7 +1167,7 @@ test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", asyn
       resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
     },
   );
-  assert.equal(firstMcpRequest.metadata.silmaril.sdk_version, "0.8.2");
+  assert.equal(firstMcpRequest.metadata.silmaril.sdk_version, "0.11.0");
   assert.equal(firstMcpRequest.metadata.vscodeHookRuntime, "local");
   assert.equal(Object.hasOwn(firstMcpRequest.resource, "parentId"), false);
   assert.equal(
@@ -1184,6 +1184,67 @@ test("SDK 0.8.2 emits canonical agent, tool, and MCP resource wire shapes", asyn
   assert.equal(transformedRequest.metadata.sessionId, "session-1");
   assert.equal(transformedRequest.metadata.conversationId, "session-1");
   assert.doesNotMatch(JSON.stringify(requests), /"parentId"/u);
+});
+
+test("SDK 0.11.0 blocks valid malicious verdicts and rejects invalid verdict numbers", async () => {
+  const responses: Array<Record<string, unknown>> = [
+    { prediction: "MALICIOUS", score: 0.97, threshold: 0.5, primary_outcome: "abuse" },
+    { prediction: "MALICIOUS", threshold: 0.5 },
+    { prediction: "MALICIOUS", score: "0.97", threshold: 0.5 },
+    { prediction: "MALICIOUS", score: 1.5, threshold: 0.5 },
+    { prediction: "MALICIOUS", score: 0.97 },
+    { prediction: "MALICIOUS", score: 0.97, threshold: -0.1 },
+  ];
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(responses.shift()));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const events: any[] = [];
+  const outputs: unknown[] = [];
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const env = {
+      ...BASE_ENV,
+      SILMARIL_API_URL: `http://127.0.0.1:${address.port}/classify`,
+      SILMARIL_MODE: "block",
+    };
+    const deps: RuntimeDependencies = {
+      firewallConstructor: Firewall as unknown as RuntimeDependencies["firewallConstructor"],
+      evidenceEmitter: async (event: unknown) => { events.push(event); },
+      workspaceObserver: async () => undefined,
+      deviceName: () => undefined,
+    };
+    for (let index = 0; index < 6; index += 1) {
+      outputs.push(await runVSCodeHook("PreToolUse", payload("PreToolUse"), env, deps));
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+
+  assert.equal(responses.length, 0);
+  assert.deepEqual(outputs, [
+    {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: SAFE_BLOCK_MESSAGE,
+      },
+    },
+    {},
+    {},
+    {},
+    {},
+    {},
+  ]);
+  assert.equal(events.length, 1);
 });
 
 test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
@@ -1205,11 +1266,11 @@ test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
     new URL("../scripts/customer-published-acceptance", import.meta.url),
     "utf8",
   );
-  assert.equal(packageJson.version, "0.3.2");
+  assert.equal(packageJson.version, "0.3.3");
   assert.equal(pluginJson.$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
   assert.equal(pluginJson.name, "silmaril-vscode-firewall");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.11.0");
   assert.equal(hooks.version, 1);
   assert.deepEqual(Object.keys(hooks.hooks), [
     "sessionStart",
