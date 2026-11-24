@@ -1186,6 +1186,67 @@ test("SDK 0.11.0 emits canonical agent, tool, and MCP resource wire shapes", asy
   assert.doesNotMatch(JSON.stringify(requests), /"parentId"/u);
 });
 
+test("SDK 0.11.0 blocks valid malicious verdicts and rejects invalid verdict numbers", async () => {
+  const responses: Array<Record<string, unknown>> = [
+    { prediction: "MALICIOUS", score: 0.97, threshold: 0.5, primary_outcome: "abuse" },
+    { prediction: "MALICIOUS", threshold: 0.5 },
+    { prediction: "MALICIOUS", score: "0.97", threshold: 0.5 },
+    { prediction: "MALICIOUS", score: 1.5, threshold: 0.5 },
+    { prediction: "MALICIOUS", score: 0.97 },
+    { prediction: "MALICIOUS", score: 0.97, threshold: -0.1 },
+  ];
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(responses.shift()));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const events: any[] = [];
+  const outputs: unknown[] = [];
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const env = {
+      ...BASE_ENV,
+      SILMARIL_API_URL: `http://127.0.0.1:${address.port}/classify`,
+      SILMARIL_MODE: "block",
+    };
+    const deps: RuntimeDependencies = {
+      firewallConstructor: Firewall as unknown as RuntimeDependencies["firewallConstructor"],
+      evidenceEmitter: async (event: unknown) => { events.push(event); },
+      workspaceObserver: async () => undefined,
+      deviceName: () => undefined,
+    };
+    for (let index = 0; index < 6; index += 1) {
+      outputs.push(await runVSCodeHook("PreToolUse", payload("PreToolUse"), env, deps));
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+
+  assert.equal(responses.length, 0);
+  assert.deepEqual(outputs, [
+    {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: SAFE_BLOCK_MESSAGE,
+      },
+    },
+    {},
+    {},
+    {},
+    {},
+    {},
+  ]);
+  assert.equal(events.length, 1);
+});
+
 test("manifests are Agent Plugins 1.0 native and version aligned", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../plugin.json", import.meta.url), "utf8"));
