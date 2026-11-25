@@ -3160,6 +3160,76 @@ test("loopback CONNECT and classifier sockets close through the bounded cleanup"
   assert.equal(incompleteClient.destroyed, true);
 });
 
+test("the loopback classifier serves each classify contract version on its own path", async () => {
+  const classifier = startClassifier();
+  const origin = new URL(await classifier.open()).origin;
+  const classify = async (pathname: string, body: Record<string, unknown>) => {
+    const response = await fetch(`${origin}${pathname}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  try {
+    assert.deepEqual(
+      await classify("/v2/classify", { hook: "tool_call", text: "SILMARIL_NATIVE_PREBLOCK_8d724ae7" }),
+      {
+        status: 200,
+        body: {
+          results: [{
+            action: "block",
+            source: "model",
+            confidence: "very_high",
+            severity: "high",
+            outcome: "control_abuse",
+            governance: { action: "allow", policy_version: "vscode-native-qualification-policy" },
+            model_id: "vscode-native-qualification",
+          }],
+        },
+      },
+    );
+    assert.deepEqual(
+      await classify("/v2/classify", { hook: "user_input", text: "SILMARIL_NATIVE_ALLOW_8d724ae7" }),
+      {
+        status: 200,
+        body: {
+          results: [{
+            action: "allow",
+            source: null,
+            confidence: null,
+            severity: null,
+            outcome: null,
+            governance: { action: "allow", policy_version: "vscode-native-qualification-policy" },
+            model_id: "vscode-native-qualification",
+          }],
+        },
+      },
+    );
+    assert.deepEqual(
+      await classify("/classify", { hook: "tool_response", text: "SILMARIL_NATIVE_POISON_8d724ae7" }),
+      {
+        status: 200,
+        body: {
+          prediction: "MALICIOUS",
+          score: 0.99,
+          threshold: 0.5,
+          primary_outcome: "control_abuse",
+          outcome_scores: { control_abuse: 0.99 },
+          governance: { action: "allow", policy_version: "vscode-native-qualification-policy" },
+          model_id: "vscode-native-qualification",
+        },
+      },
+    );
+    assert.equal((await classify("/v3/classify", { hook: "user_input", text: "unserved" })).status, 404);
+  } finally {
+    await classifier.close();
+  }
+  assert.deepEqual(
+    classifier.requests.map((request) => request.decision),
+    ["malicious", "benign", "malicious"],
+  );
+});
+
 test("owned server close rejects when its callback never settles", async () => {
   const started = Date.now();
   await assert.rejects(

@@ -1,9 +1,9 @@
 # Third-party licenses
 
-## @silmaril-security/sdk 0.11.0
+## @silmaril-security/sdk 1.0.0
 
 The committed `dist/vscode-hook.js` bundle includes
-`@silmaril-security/sdk` 0.11.0 under these terms:
+`@silmaril-security/sdk` 1.0.0 under these terms:
 
 > PROPRIETARY AND CONFIDENTIAL
 >
