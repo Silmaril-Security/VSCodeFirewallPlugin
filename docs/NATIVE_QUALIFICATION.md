@@ -9,8 +9,9 @@ this procedure.
 
 The exact signed 1.145.2 native matrix **failed** against the now-superseded
 candidate 0.3.1. Those observations are explicitly historical; no native host
-test has run for 0.4.0. No native pass has been recorded for the current
-candidate, and candidate 0.4.0 is not qualified for publication.
+test has run for 0.3.2, 0.3.3, or 0.4.0. No native pass has been recorded for
+the current candidate, and candidate 0.4.0 is not qualified for managed
+propagation.
 
 - VS Code 1.141.1 (`7baac39ec3ca969dab74ac12c097f6a486e46593`,
   built-in Copilot Chat 0.69.0) is unsupported. Its exact signed source lacks
@@ -48,7 +49,7 @@ including preflight and failure receipts, separately records full release
 qualification as `incomplete`, batch/resume as `unsupported`, native
 Warn/Shadow as `unassessed`, and the shared route as `unverified` until exact
 callback metadata proves it. A four-case core pass would not be a full release
-matrix pass or qualify candidate 0.4.0 for publication.
+matrix pass or qualify candidate 0.4.0 for managed propagation.
 
 The relevant official source at the exact commit is:
 
@@ -467,10 +468,11 @@ The candidate admission floor is 1.145.2, but it is not a qualified supported
 floor. Managed propagation remains gated on a native matrix pass that preserves
 the strict title-request and post-tool-poison oracles. The shared
 transformed-prompt and `modifiedResult` contracts remain source-only until a
-supported shared Agent Host route proves them. Standalone 0.4.0 publishes
-through customer release acceptance. 0.3.1 stays unreleased, and 0.3.0 and
-0.3.2 are not modified or relabelled. The failed 0.3.1 observations remain
-historical and do not qualify the 0.4.0 package.
+supported shared Agent Host route proves them. Standalone releases, including
+0.3.2, 0.3.3, and 0.4.0, publish through customer release acceptance. 0.3.1
+stays unreleased, and 0.3.0, 0.3.2, and 0.3.3 are not modified or relabelled.
+The failed 0.3.1 observations remain historical and do not qualify the 0.4.0
+package.
 
 ## Release acceptance on MacStadium
 

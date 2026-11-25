@@ -27,6 +27,13 @@
 - Serve `/v2/classify` and `/classify` from the native QA loopback classifier
   and cover the fallback and a version 1 body returned by `/v2/classify`.
 
+## 0.3.3
+
+- Bundle SDK 0.11.0, whose outcome taxonomy names the tenant acceptable-use
+  policy outcome `abuse`, and which rejects classifier responses without a
+  numeric `score` and `threshold` from 0 through 1. A rejected response is a
+  classification error and returns `{}`.
+
 ## 0.3.2
 
 - Released as [v0.3.2](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.2).

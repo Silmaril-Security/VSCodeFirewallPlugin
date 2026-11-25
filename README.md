@@ -35,9 +35,11 @@ successful tool-result text without reading transcripts.
 
 ## Requirements
 
-Release [v0.3.0](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.0)
-remains immutable. Current source is the unreleased 0.4.0 candidate, which
-follows the released 0.3.2 and supersedes the unreleased 0.3.1 candidate.
+Releases [v0.3.0](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.0),
+[v0.3.2](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.2),
+and [v0.3.3](https://github.com/Silmaril-Security/VSCodeFirewallPlugin/releases/tag/v0.3.3)
+remain immutable; 0.3.1 was never released. Current source is the unreleased
+0.4.0 candidate, which follows the released 0.3.3 and moves to SDK 1.0.0.
 Installation remains a managed local macOS operation owned by SilmarilMacOS,
 whose separately hashed adapter manifest invokes the signed Silmaril runtime.
 That managed adapter must implement the same event contract but is not
@@ -47,9 +49,10 @@ VS Code Marketplace or npm distribution, and checking it out does not qualify
 direct GUI, remote, or native-host protection.
 
 SilmarilMacOS manages local installation and configuration. Plugin 0.3.0
-retains its historical requirements. Candidate 0.4.0 requires macOS, Node.js 22
-or newer, and VS Code 1.145.2 or newer; managed admission must reject every
-earlier version without changing the existing protection state. Version
+retains its historical requirements. Candidate 0.4.0, like 0.3.2 and 0.3.3,
+requires macOS, Node.js 22 or newer, and VS Code 1.145.2 or newer; managed
+admission must reject every earlier version without changing the existing
+protection state. Version
 1.145.2 is the conservative source target and security-admission floor, not a
 qualified supported floor or a claim that it is the earliest possible upstream
 version. Signed VS Code 1.141.1 lacks the required transformed-prompt and
@@ -59,11 +62,13 @@ The exact signed 1.145.2 native matrix ran against the superseded 0.3.1
 candidate and **failed**. Its built-in Local route blocked the main malicious
 agent prompt and denied pre-tool execution, but a title-generation model
 request sent the blocked prompt before `UserPromptSubmit`, and the raw blocked
-post-tool result reached the next dummy model request. No native host test has
-run for 0.4.0. The shared Agent Host replacement contracts remain source-only
-and unqualified until a supported shared route exercises them. No universal
+post-tool result reached the next dummy model request. No native host matrix
+has run for 0.3.2, 0.3.3, or 0.4.0. Standalone releases publish through
+customer release acceptance, which is not native matrix qualification. The
+shared Agent Host replacement contracts remain source-only and unqualified
+until a supported shared route exercises them. No universal
 title-confidentiality or native protection claim follows from the current
-source checks, and candidate 0.4.0 must not be published on this evidence.
+source checks.
 
 Native QA receipt `pass` is scoped only to the four-case allow, prompt-block,
 pre-tool-block, and post-tool-block core. Every receipt separately keeps full
@@ -71,8 +76,8 @@ release qualification `incomplete`, batch/resume `unsupported`, and native
 Warn/Shadow `unassessed`. The shared route remains `unverified` unless every
 required classifier callback has exact `copilot` runtime metadata and its
 corresponding `userPromptTransformed`, `preToolUse`, or `postToolUse` event.
-Neither source preflight nor a four-case core pass qualifies 0.4.0 for
-publication.
+Neither source preflight nor a four-case core pass qualifies a candidate for
+managed propagation.
 
 The manifest uses the portable `command` field, but `scripts/run-hook.sh`
 intentionally supports only the managed macOS installation. On an unsupported
@@ -214,8 +219,8 @@ Code's ephemeral in-memory secret storage. No native pass has been recorded.
 The public native command is preflight-only by default; its optional human
 workflow requires a new owned synthetic root, an explicit one-launch gate, and
 three contained markers for normal trust and the source-verified two-phase
-Extensions UI setup. Do not publish 0.4.0 or propagate a supported-floor claim
-until a reviewed native matrix passes without weakening the title-request or
+Extensions UI setup. Do not propagate a supported-floor claim through managed
+installation until a reviewed native matrix passes without weakening the title-request or
 post-tool-result oracles. Do not claim byte identity between the standalone
-and managed delivery forms. Do not modify or relabel the existing 0.3.0
-release or previously signed macOS artifacts.
+and managed delivery forms. Do not modify or relabel the existing 0.3.0 or
+0.3.2 releases or previously signed macOS artifacts.
